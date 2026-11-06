@@ -51693,7 +51693,26 @@ void update(int ingame, int usevwait)
 
     /********** update screen **************/
 
+#ifdef SAB
+    {
+        /* SAB post effects (sab/sab.c): the level is graded, the HUD drawn after */
+        extern int sab_postfx_active(void);
+        extern int sab_postfx_split(void);
+        extern void sab_postfx_apply(s_screen *scr);
+        if(ingame == 1 && !_pause && sab_postfx_active())
+        {
+            spriteq_draw(vscreen, 0, MIN_INT, sab_postfx_split() - 1, 0, 0);
+            sab_postfx_apply(vscreen);
+            spriteq_draw(vscreen, 0, sab_postfx_split(), MAX_INT, 0, 0);
+        }
+        else
+        {
+            spriteq_draw(vscreen, 0, MIN_INT, MAX_INT, 0, 0);
+        }
+    }
+#else
     spriteq_draw(vscreen, 0, MIN_INT, MAX_INT, 0, 0); // notice, always draw sprites at the very end of other methods
+#endif
 
     if(_pause != 2 && !noscreenshot && (bothnewkeys & FLAG_SCREENSHOT))
     {

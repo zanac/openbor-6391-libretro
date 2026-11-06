@@ -83,3 +83,23 @@ in `[ylo, yhi]` while it is on. Units are whatever the mod uses.
 | Function | Description |
 | --- | --- |
 | `sab_camera(on, x, y)` | `1`: the engine's scroll position is set to (x, y) pixels every frame, after the engine's own scrolling; the level position follows x, so `at` spawns still work; `0`: back to the engine's scrolling |
+
+### Post effects
+
+A colour grade and a bloom applied to the 32-bit screen of a running level
+(not during the pause menu). The sprite queue is drawn in two parts: what
+lies below the split z is drawn, graded, then the rest (HUD, script texts)
+is drawn on top unchanged. Nothing happens until a script enables it, so
+other mods are not affected.
+
+| Function | Description |
+| --- | --- |
+| `sab_postfx_load(lut, curves)` | `lut`: a file of N³ RGB bytes (any N up to 256), node (r, g, b) at byte `((b·N + g)·N + r)·3`, looked up trilinearly before the bloom (results cached per colour); `curves`: an optional file of 3 × 256 bytes (R, G, B tables) applied after the bloom, `""` for none. Returns 1 on success |
+| `sab_postfx(on, curves)` | enable / disable; `curves` 0 skips the tables (e.g. a scene where the game disables its curves) |
+| `sab_postfx_bloom(intensity, threshold)` | Unity Standard Assets `Bloom` (quality High, 2 blur iterations, spread 2.5, Add): 4×4 max to a quarter-size image, [1, 2, 1] tent, `max(c − threshold, 0)`, two cumulative 9-tap blurs combined with max, tent, two bilinear 2× upsamples, `+ intensity ·` the result. Intensity 0 turns it off |
+| `sab_postfx_zsplit(z)` | sprite-queue z where the grading stops (default `HUD_Z`) |
+
+Cost: about 3.5 ms per 640×360 frame on the build machine (one thread).
+The Slaps And Beans mod uses it for the Western camera chain (its
+`docs/postfx.md`); against that document's exact chain the engine output
+differs by 0.5 levels on average (max 6).

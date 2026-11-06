@@ -31,6 +31,20 @@
  *                                     (x, y) every frame (level position
  *                                     follows x, so spawns "at" still work);
  *                                     0: back to the engine's scrolling
+ *   Post effects (32-bit screens; what is queued below the split z is
+ *   graded, the rest - HUD, texts - is drawn on top unchanged)
+ *     sab_postfx_load(lut, curves)    a colour LUT file (N^3 RGB bytes, node
+ *                                     (r,g,b) at ((b*N + g)*N + r)*3) applied
+ *                                     before the bloom, and an optional
+ *                                     per-channel table (3 x 256 bytes, R G B)
+ *                                     applied after it ("" = none); 1/0
+ *     sab_postfx(on, curves)          enable; curves 0 skips the table
+ *     sab_postfx_bloom(intensity, threshold)
+ *                                     Unity Standard Assets Bloom (High,
+ *                                     2 blur iterations, spread 2.5, Add);
+ *                                     intensity 0 = off
+ *     sab_postfx_zsplit(z)            sprite-queue z where the grading stops
+ *                                     (default HUD_Z)
  */
 
 #include <time.h>
@@ -1050,6 +1064,428 @@ void sab_camera_apply(void)
     level->pos = (int)advancex;
 }
 
+
+/* ============================================================ post effects */
+
+static int sab_pfx_on = 0, sab_pfx_curves_on = 0, sab_pfx_n = 0, sab_pfx_have_curves = 0;
+static int sab_pfx_zsplit = 0, sab_pfx_zsplit_set = 0;
+static unsigned char *sab_pfx_lut = NULL;
+static unsigned char sab_pfx_curves[3][256];
+static double sab_pfx_intensity = 0.0, sab_pfx_threshold = 0.5;
+static unsigned char *sab_pfx_a = NULL;        /* graded frame before the bloom, RGB */
+
+/* Direct-mapped cache of graded colours (pixel art: few colours per frame). */
+#define SAB_PFX_CACHE 65536
+static unsigned int sab_pfx_ckey[SAB_PFX_CACHE];
+static unsigned char sab_pfx_cval[SAB_PFX_CACHE][3];
+
+int sab_postfx_active(void)
+{
+    return sab_pfx_on && sab_pfx_lut;
+}
+
+int sab_postfx_split(void)
+{
+    return sab_pfx_zsplit_set ? sab_pfx_zsplit : HUD_Z;
+}
+
+HRESULT sab_postfx_load(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    const char *lp = sab_arg_str(varlist, 0, paramCount), *cp = sab_arg_str(varlist, 1, paramCount);
+    size_t len = 0;
+    char *buf;
+    int n;
+
+    sab_ret_long(pretvar, 0);
+    if(!lp)
+    {
+        return S_OK;
+    }
+    buf = sab_read_file(lp, &len);
+    if(!buf)
+    {
+        printf("sab_postfx_load: cannot open %s\n", lp);
+        return S_OK;
+    }
+    for(n = 2; n <= 256 && (size_t)n * n * n * 3 < len; n++)
+    {
+    }
+    if((size_t)n * n * n * 3 != len)
+    {
+        printf("sab_postfx_load: %s is not an N^3 RGB table (%d bytes)\n", lp, (int)len);
+        free(buf);
+        return S_OK;
+    }
+    free(sab_pfx_lut);
+    sab_pfx_lut = (unsigned char *)buf;
+    memset(sab_pfx_ckey, 0, sizeof(sab_pfx_ckey));
+    sab_pfx_n = n;
+    sab_pfx_have_curves = 0;
+    if(cp && cp[0])
+    {
+        buf = sab_read_file(cp, &len);
+        if(buf && len == 768)
+        {
+            memcpy(sab_pfx_curves, buf, 768);
+            sab_pfx_have_curves = 1;
+        }
+        else
+        {
+            printf("sab_postfx_load: bad curves file %s\n", cp);
+        }
+        free(buf);
+    }
+    sab_ret_long(pretvar, 1);
+    return S_OK;
+}
+
+HRESULT sab_postfx(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    LONG on = 0, curves = 1;
+
+    sab_arg_long(varlist, 0, paramCount, &on);
+    sab_arg_long(varlist, 1, paramCount, &curves);
+    sab_pfx_on = on ? 1 : 0;
+    sab_pfx_curves_on = curves ? 1 : 0;
+    *pretvar = NULL;
+    return S_OK;
+}
+
+HRESULT sab_postfx_bloom(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    DOUBLE i = 0, t = 0.5;
+
+    sab_arg_double(varlist, 0, paramCount, &i);
+    sab_arg_double(varlist, 1, paramCount, &t);
+    sab_pfx_intensity = i;
+    sab_pfx_threshold = t;
+    *pretvar = NULL;
+    return S_OK;
+}
+
+HRESULT sab_postfx_zsplit(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    LONG z = 0;
+
+    if(sab_arg_long(varlist, 0, paramCount, &z))
+    {
+        sab_pfx_zsplit = (int)z;
+        sab_pfx_zsplit_set = 1;
+    }
+    *pretvar = NULL;
+    return S_OK;
+}
+
+
+static void sab_pfx_lookup_slow(const unsigned char *src, unsigned char *dst);
+
+static void sab_pfx_lookup(const unsigned char *src, unsigned char *dst)
+{
+    unsigned int key = src[0] | (src[1] << 8) | (src[2] << 16) | 0x1000000u;
+    unsigned int h = (key * 2654435761u) >> 16;
+
+    if(sab_pfx_ckey[h] == key)
+    {
+        dst[0] = sab_pfx_cval[h][0];
+        dst[1] = sab_pfx_cval[h][1];
+        dst[2] = sab_pfx_cval[h][2];
+        return;
+    }
+    sab_pfx_lookup_slow(src, dst);
+    sab_pfx_ckey[h] = key;
+    sab_pfx_cval[h][0] = dst[0];
+    sab_pfx_cval[h][1] = dst[1];
+    sab_pfx_cval[h][2] = dst[2];
+}
+
+/* Trilinear lookup of one 8-bit colour in the N^3 table. */
+static void sab_pfx_lookup_slow(const unsigned char *src, unsigned char *dst)
+{
+    int n = sab_pfx_n, ch, i;
+    int fr = src[0] * (n - 1), fg = src[1] * (n - 1), fb = src[2] * (n - 1);
+    int r0 = fr / 255, g0 = fg / 255, b0 = fb / 255;
+    int r1 = r0 < n - 1 ? r0 + 1 : r0, g1 = g0 < n - 1 ? g0 + 1 : g0, b1 = b0 < n - 1 ? b0 + 1 : b0;
+    int wr = (fr - r0 * 255) * 256 / 255, wg = (fg - g0 * 255) * 256 / 255, wb = (fb - b0 * 255) * 256 / 255;
+    const unsigned char *L = sab_pfx_lut;
+    int o[8];
+
+    o[0] = ((b0 * n + g0) * n + r0) * 3;
+    o[1] = ((b0 * n + g0) * n + r1) * 3;
+    o[2] = ((b0 * n + g1) * n + r0) * 3;
+    o[3] = ((b0 * n + g1) * n + r1) * 3;
+    o[4] = ((b1 * n + g0) * n + r0) * 3;
+    o[5] = ((b1 * n + g0) * n + r1) * 3;
+    o[6] = ((b1 * n + g1) * n + r0) * 3;
+    o[7] = ((b1 * n + g1) * n + r1) * 3;
+    for(ch = 0; ch < 3; ch++)
+    {
+        int c00 = L[o[0] + ch] * (256 - wr) + L[o[1] + ch] * wr;
+        int c01 = L[o[2] + ch] * (256 - wr) + L[o[3] + ch] * wr;
+        int c10 = L[o[4] + ch] * (256 - wr) + L[o[5] + ch] * wr;
+        int c11 = L[o[6] + ch] * (256 - wr) + L[o[7] + ch] * wr;
+        int c0 = (c00 * (256 - wg) + c01 * wg) >> 8;
+        int c1 = (c10 * (256 - wg) + c11 * wg) >> 8;
+        i = (c0 * (256 - wb) + c1 * wb + (1 << 15)) >> 16;
+        dst[ch] = (unsigned char)(i > 255 ? 255 : i);
+    }
+}
+
+/* [1, 2, 1] / 4 separable tent with clamped edges (an 8-bit pass each way). */
+static void sab_pfx_tent(unsigned char *q, int w, int h, unsigned char *tmp)
+{
+    int x, y, c;
+
+    for(y = 0; y < h; y++)
+    {
+        for(x = 0; x < w; x++)
+        {
+            int xl = x > 0 ? x - 1 : 0, xr = x < w - 1 ? x + 1 : x;
+            for(c = 0; c < 3; c++)
+            {
+                tmp[(y * w + x) * 3 + c] = (unsigned char)((q[(y * w + xl) * 3 + c] + 2 * q[(y * w + x) * 3 + c]
+                                                            + q[(y * w + xr) * 3 + c] + 2) >> 2);
+            }
+        }
+    }
+    for(y = 0; y < h; y++)
+    {
+        int yu = y > 0 ? y - 1 : 0, yd = y < h - 1 ? y + 1 : y;
+        for(x = 0; x < w; x++)
+        {
+            for(c = 0; c < 3; c++)
+            {
+                q[(y * w + x) * 3 + c] = (unsigned char)((tmp[(yu * w + x) * 3 + c] + 2 * tmp[(y * w + x) * 3 + c]
+                                                          + tmp[(yd * w + x) * 3 + c] + 2) >> 2);
+            }
+        }
+    }
+}
+
+/* BlurAndFlares pass 4: 9 bilinear taps at 0, +-1, +-2, +-3, +-5 x unit,
+   weights 0.225, 0.15, 0.11, 0.075, 0.0525, folded into an integer kernel. */
+static int sab_pfx_kernel(double unit, double *k, int maxr)
+{
+    static const double off[5] = {0, 1, 2, 3, 5}, wt[5] = {0.225, 0.15, 0.11, 0.075, 0.0525};
+    int i, s, r = 0;
+
+    for(i = 0; i <= 2 * maxr; i++)
+    {
+        k[i] = 0;
+    }
+    for(i = 0; i < 5; i++)
+    {
+        for(s = -1; s <= 1; s += 2)
+        {
+            double d = off[i] * unit * s, f;
+            int d0;
+
+            if(i == 0 && s > 0)
+            {
+                continue;
+            }
+            d0 = (int)floor(d);
+            f = d - d0;
+            if(d0 + 1 > maxr || d0 < -maxr)
+            {
+                continue;
+            }
+            k[d0 + maxr] += wt[i] * (1 - f);
+            k[d0 + 1 + maxr] += wt[i] * f;
+            if(abs(d0) + 1 > r)
+            {
+                r = abs(d0) + 1;
+            }
+        }
+    }
+    return r;
+}
+
+static void sab_pfx_blur(unsigned char *src, unsigned char *dst, int w, int h, double unit, unsigned char *tmp)
+{
+    double k[25];
+    int R = 12, x, y, c, i, nt = 0, off[25], wt[25];
+
+    sab_pfx_kernel(unit, k, R);
+    for(i = 0; i <= 2 * R; i++)
+    {
+        if(k[i] > 0)
+        {
+            off[nt] = i - R;
+            wt[nt] = (int)(k[i] * 65536 + 0.5);
+            nt++;
+        }
+    }
+    for(y = 0; y < h; y++)                        /* vertical */
+    {
+        for(x = 0; x < w; x++)
+        {
+            for(c = 0; c < 3; c++)
+            {
+                int v = 0;
+                for(i = 0; i < nt; i++)
+                {
+                    int yy = y + off[i];
+                    yy = yy < 0 ? 0 : (yy >= h ? h - 1 : yy);
+                    v += wt[i] * src[(yy * w + x) * 3 + c];
+                }
+                v = (v + 32768) >> 16;
+                tmp[(y * w + x) * 3 + c] = (unsigned char)(v > 255 ? 255 : v);
+            }
+        }
+    }
+    for(y = 0; y < h; y++)                        /* horizontal */
+    {
+        for(x = 0; x < w; x++)
+        {
+            for(c = 0; c < 3; c++)
+            {
+                int v = 0;
+                for(i = 0; i < nt; i++)
+                {
+                    int xx = x + off[i];
+                    xx = xx < 0 ? 0 : (xx >= w ? w - 1 : xx);
+                    v += wt[i] * tmp[(y * w + xx) * 3 + c];
+                }
+                v = (v + 32768) >> 16;
+                dst[(y * w + x) * 3 + c] = (unsigned char)(v > 255 ? 255 : v);
+            }
+        }
+    }
+}
+
+/* Bilinear 2x upsample (texel centres), RGB: output texel 2i samples
+   0.75 src i + 0.25 src i-1, 2i+1 samples 0.75 src i + 0.25 src i+1. */
+static void sab_pfx_up2(const unsigned char *src, int w, int h, unsigned char *dst)
+{
+    int W = w * 2, H = h * 2, x, y, c;
+
+    for(y = 0; y < H; y++)
+    {
+        int y0 = y >> 1, y1 = (y & 1) ? y0 + 1 : y0 - 1;
+        y1 = y1 < 0 ? 0 : (y1 >= h ? h - 1 : y1);
+        for(x = 0; x < W; x++)
+        {
+            int x0 = x >> 1, x1 = (x & 1) ? x0 + 1 : x0 - 1;
+            const unsigned char *a, *b, *cc, *d;
+            unsigned char *o = dst + (y * W + x) * 3;
+            x1 = x1 < 0 ? 0 : (x1 >= w ? w - 1 : x1);
+            a = src + (y0 * w + x0) * 3;
+            b = src + (y0 * w + x1) * 3;
+            cc = src + (y1 * w + x0) * 3;
+            d = src + (y1 * w + x1) * 3;
+            for(c = 0; c < 3; c++)
+            {
+                o[c] = (unsigned char)((9 * a[c] + 3 * b[c] + 3 * cc[c] + d[c] + 8) >> 4);
+            }
+        }
+    }
+}
+
+/*
+ * The camera chain on a 32-bit screen (docs/postfx.md 8): pre LUT, bloom
+ * (4x4 max to a quarter, tent, threshold, two cumulative 9-tap blurs combined
+ * with max, tent, 2x bilinear up twice, + intensity), the curves table.
+ */
+void sab_postfx_apply(s_screen *scr)
+{
+    int W, H, x, y, c, qw, qh;
+    unsigned char *px, *q = NULL, *t = NULL, *b0 = NULL, *b1 = NULL, *tmp = NULL, *u1 = NULL, *u2 = NULL;
+
+    if(!sab_postfx_active() || !scr || scr->pixelformat != PIXEL_32)
+    {
+        return;
+    }
+    W = scr->width;
+    H = scr->height;
+    sab_pfx_a = realloc(sab_pfx_a, (size_t)W * H * 3);
+    px = scr->data;
+    for(y = 0; y < H; y++)
+    {
+        for(x = 0; x < W; x++)
+        {
+            sab_pfx_lookup(px + ((size_t)y * W + x) * 4, sab_pfx_a + ((size_t)y * W + x) * 3);
+        }
+    }
+    if(sab_pfx_intensity > 0 && W % 4 == 0 && H % 4 == 0)
+    {
+        int th = (int)(sab_pfx_threshold * 255 + 0.5);
+        qw = W / 4;
+        qh = H / 4;
+        q = malloc((size_t)qw * qh * 3);
+        tmp = malloc((size_t)qw * qh * 3);
+        b0 = malloc((size_t)qw * qh * 3);
+        b1 = malloc((size_t)qw * qh * 3);
+        u1 = malloc((size_t)qw * qh * 3 * 4);
+        u2 = malloc((size_t)W * H * 3);
+        for(y = 0; y < qh; y++)
+        {
+            for(x = 0; x < qw; x++)
+            {
+                for(c = 0; c < 3; c++)
+                {
+                    int m = 0, i, j;
+                    for(j = 0; j < 4; j++)
+                    {
+                        for(i = 0; i < 4; i++)
+                        {
+                            int v = sab_pfx_a[((size_t)(y * 4 + j) * W + x * 4 + i) * 3 + c];
+                            m = v > m ? v : m;
+                        }
+                    }
+                    q[(y * qw + x) * 3 + c] = (unsigned char)m;
+                }
+            }
+        }
+        sab_pfx_tent(q, qw, qh, tmp);
+        for(x = 0; x < qw * qh * 3; x++)
+        {
+            q[x] = (unsigned char)(q[x] > th ? q[x] - th : 0);
+        }
+        sab_pfx_blur(q, b0, qw, qh, 2.5 * qh / 512.0, tmp);
+        sab_pfx_blur(b0, b1, qw, qh, 3.125 * qh / 512.0, tmp);
+        for(x = 0; x < qw * qh * 3; x++)
+        {
+            q[x] = b0[x] > b1[x] ? b0[x] : b1[x];
+        }
+        sab_pfx_tent(q, qw, qh, tmp);
+        sab_pfx_up2(q, qw, qh, u1);
+        sab_pfx_up2(u1, qw * 2, qh * 2, u2);
+        {
+            int ki = (int)(sab_pfx_intensity * 256 + 0.5);
+            for(x = 0; x < W * H * 3; x++)
+            {
+                int v = sab_pfx_a[x] + ((ki * u2[x] + 128) >> 8);
+                sab_pfx_a[x] = (unsigned char)(v > 255 ? 255 : v);
+            }
+        }
+        free(q);
+        free(tmp);
+        free(b0);
+        free(b1);
+        free(u1);
+        free(u2);
+    }
+    for(y = 0; y < H; y++)
+    {
+        for(x = 0; x < W; x++)
+        {
+            unsigned char *d = px + ((size_t)y * W + x) * 4, *a = sab_pfx_a + ((size_t)y * W + x) * 3;
+            if(sab_pfx_have_curves && sab_pfx_curves_on)
+            {
+                d[0] = sab_pfx_curves[0][a[0]];
+                d[1] = sab_pfx_curves[1][a[1]];
+                d[2] = sab_pfx_curves[2][a[2]];
+            }
+            else
+            {
+                d[0] = a[0];
+                d[1] = a[1];
+                d[2] = a[2];
+            }
+        }
+    }
+}
+
 /* ============================================================ registration */
 
 void sab_register_functions(List *list)
@@ -1063,4 +1499,8 @@ void sab_register_functions(List *list)
     List_InsertAfter(list, (void *)sab_nav_raycast, "sab_nav_raycast");
     List_InsertAfter(list, (void *)sab_nav_patch, "sab_nav_patch");
     List_InsertAfter(list, (void *)sab_camera, "sab_camera");
+    List_InsertAfter(list, (void *)sab_postfx_load, "sab_postfx_load");
+    List_InsertAfter(list, (void *)sab_postfx, "sab_postfx");
+    List_InsertAfter(list, (void *)sab_postfx_bloom, "sab_postfx_bloom");
+    List_InsertAfter(list, (void *)sab_postfx_zsplit, "sab_postfx_zsplit");
 }
