@@ -10,6 +10,10 @@
  *          dump=F1,F2,...          write <workdir>/frame_<F>.ppm
  *          unload=F                stop at frame F and unload
  *
+ * VIDEO=<file.mp4> (environment) pipes every frame to ffmpeg (H.264, the
+ * core's frame rate; a duplicated frame repeats the previous one); mux
+ * audio.wav afterwards.
+ *
  * Writes <workdir>/audio.wav and prints a summary on stdout.
  */
 #include <dlfcn.h>
@@ -25,7 +29,7 @@
 
 #include "libretro.h"
 
-#define MAX_EVENTS 256
+#define MAX_EVENTS 8192
 #define MAX_DUMPS  64
 
 typedef struct { long frame; int port; int id; int hold; } event_t;
@@ -187,9 +191,39 @@ static void dump_ppm(const uint32_t *p, unsigned w, unsigned h, size_t pitch)
     printf("[dump] %s (%ux%u)\n", path, w, h);
 }
 
+static FILE *video_pipe;
+static uint8_t *video_last;
+static unsigned video_w, video_h;
+static double video_fps = 60.0;
+
+/* VIDEO=<file>: one BGRA frame per retro_run() into ffmpeg. */
+static void video_write(const void *data, unsigned w, unsigned h, size_t pitch)
+{
+    unsigned y;
+    if (!getenv("VIDEO"))
+        return;
+    if (!video_pipe && data)
+    {
+        char cmd[1400];
+        video_w = w;
+        video_h = h;
+        video_last = (uint8_t *)calloc((size_t)w * h, 4);
+        snprintf(cmd, sizeof(cmd), "ffmpeg -y -loglevel error -f rawvideo -pix_fmt bgra -s %ux%u -r %.4f -i - "
+                 "-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p '%s'", w, h, video_fps, getenv("VIDEO"));
+        video_pipe = popen(cmd, "w");
+    }
+    if (!video_pipe)
+        return;
+    if (data && w == video_w && h == video_h)
+        for (y = 0; y < h; y++)
+            memcpy(video_last + (size_t)y * w * 4, (const uint8_t *)data + y * pitch, (size_t)w * 4);
+    fwrite(video_last, 4, (size_t)video_w * video_h, video_pipe);
+}
+
 static void video_cb(const void *data, unsigned w, unsigned h, size_t pitch)
 {
     int i;
+    video_write(data, w, h, pitch);
     if (!data)
     {
         frames_duped++;
@@ -349,6 +383,7 @@ int main(int argc, char **argv)
            av.geometry.base_width, av.geometry.base_height, av.geometry.max_width,
            av.geometry.max_height, av.geometry.aspect_ratio, av.timing.fps, av.timing.sample_rate);
 
+    video_fps = av.timing.fps > 0 ? av.timing.fps : 60.0;
     snprintf(wavpath, sizeof(wavpath), "%s/audio.wav", workdir);
     wav = fopen(wavpath, "wb");
     if (wav) wav_header(wav, 0);
@@ -377,6 +412,8 @@ int main(int argc, char **argv)
     printf("[result] audio frames %ld (expected ~%ld), rms %.1f\n",
            audio_frames, (long)(frame_no * 735), audio_frames ? sqrt(audio_energy / (audio_frames * 2.0)) : 0.0);
 
+    if (video_pipe)
+        pclose(video_pipe);
     p_retro_unload_game();
     printf("[result] unload ok\n");
     p_retro_deinit();

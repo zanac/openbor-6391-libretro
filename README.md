@@ -269,7 +269,8 @@ damage-over-time arrays.
 * `test/frontend.c` — minimal headless libretro frontend (scripted pad input,
   frame dumps to PPM, audio to WAV; core options from environment variables,
   e.g. `OPENBOR_ENGINE=3711`; `REALTIME=1` paces frames at 60 Hz like a real
-  frontend, needed to see WebM videos).
+  frontend, needed to see WebM videos; `VIDEO=out.mp4` pipes every frame to
+  ffmpeg).
 * `test/make_test_mod.py` — generates a tiny synthetic mod (fonts,
   backgrounds, sounds, Vorbis music; `--video-mode N` for 3.x engines).
 * `test/detect_cli.c` — prints the engine auto-detection would pick
