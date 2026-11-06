@@ -737,12 +737,12 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
                 ids[nids++] = engines[i].id;
         ob_detect_version(game->path, ids, nids, &det);
         for (ncand = 0; ncand < nids; ncand++)
-            cand[ncand] = engine_for_build(ids[ncand], det.webm_files > 0);
+            cand[ncand] = engine_for_build(ids[ncand], det.webm_files > 0 || det.sab_calls > 0);
         for (i = 0; i < ncand; i++)
             if (ids[i] == det.version) first = i;
         if (first < 0) first = ncand - 1;
         core_log(RETRO_LOG_INFO, "Auto-detected engine %s (%s%s).\n", engines[cand[first]].name, det.reason,
-                 engines[cand[first]].webm ? "; the pak has WebM videos" : "");
+                 engines[cand[first]].webm ? (det.sab_calls > 0 ? "; SAB extensions" : "; the pak has WebM videos") : "");
         order[n++] = cand[first];
         for (i = first + 1; i < ncand; i++) order[n++] = cand[i];
         for (i = first - 1; i >= 0; i--) order[n++] = cand[i];

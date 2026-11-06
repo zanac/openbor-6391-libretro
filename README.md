@@ -15,7 +15,12 @@ right one for each game:
 | **v4.0 Build 8025 + WebM** (`8025_webm`) | the same | mods with `.webm` videos (intros, logos, animated menus), e.g. *Streets of Rage X* (see below) |
 
 `8025_webm` is build 8025 compiled with WebM video playback (VP8 video +
-Vorbis audio, as upstream's WebM-enabled builds). It decodes videos in
+Vorbis audio, as upstream's WebM-enabled builds) and with **SAB**, native
+script extensions for script-driven mods (`sab_*` functions: profiler,
+navigation map, camera override) plus an O(1) script `free()`; existing mods
+call no `sab_*` function and behave as on stock 8025 — see
+[`engines/8025/sab/README.md`](engines/8025/sab/README.md). Paks whose
+scripts call `sab_*` functions are started with `8025_webm` automatically. It decodes videos in
 background threads; it is picked automatically for build 8025 mods whose pak
 contains `.webm` files, while the plain `8025` engine stays single-threaded.
 

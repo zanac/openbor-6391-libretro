@@ -107,7 +107,9 @@ ENGINE_8025_SOURCES := \
 # 8025_webm: the same engine with WebM video playback (webmlib + libvpx from
 # deps/, decoded in threads), as upstream's WebM-enabled builds
 ENGINE_8025_webm_NAME    := v4.0 Build 8025 + WebM
-ENGINE_8025_webm_FLAGS   := $(ENGINE_8025_FLAGS) -DWEBM
+# + SAB: native script extensions (sab/README.md); only new sab_* builtins,
+# nothing changes for existing mods
+ENGINE_8025_webm_FLAGS   := $(ENGINE_8025_FLAGS) -DWEBM -DSAB
 ENGINE_8025_webm_SOURCES := $(ENGINE_8025_SOURCES) \
 	$(E8025)/source/webmlib/halloc/halloc.c \
 	$(E8025)/source/webmlib/nestegg/nestegg.c \

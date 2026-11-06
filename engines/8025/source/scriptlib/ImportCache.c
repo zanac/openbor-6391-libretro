@@ -284,4 +284,27 @@ void ImportCache_Clear()
     List_Clear(&imports);
 }
 
+#ifdef SAB
+/*
+ * SAB profiler (sab/sab.c): name of an imported script function from its
+ * entry point, or NULL. Linear, used once per function (the profiler caches).
+ */
+const char *ImportCache_NameOf(Instruction **target)
+{
+    Node *n, *f;
 
+    for(n = imports.first; n; n = n->next)
+    {
+        ImportNode *node = (ImportNode *)n->value;
+
+        for(f = node->functions.first; f; f = f->next)
+        {
+            if((Instruction **)f->value == target)
+            {
+                return f->name;
+            }
+        }
+    }
+    return NULL;
+}
+#endif

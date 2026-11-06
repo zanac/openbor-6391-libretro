@@ -51,6 +51,7 @@ typedef struct
     unsigned char *fcat;
     int nfiles, fcap;
     char **userfuncs;      /* functions defined by the mod's scripts */
+    int sab_calls;         /* calls of SAB extension functions (sab_*) */
     int nuser, ucap;
     int video_wxh;         /* video.txt uses "video WxH" */
 } scan_t;
@@ -419,6 +420,8 @@ static void scan_script(scan_t *s, const char *src)
                 if (!strcmp(prev, "void") || !strcmp(prev, "int") || !strcmp(prev, "float") ||
                     !strcmp(prev, "char") || !strcmp(prev, "long") || !strcmp(prev, "double"))
                     add_userfunc(s, word);
+                else if (!strncmp(word, "sab_", 4))
+                    s->sab_calls++;     /* SAB extensions: engine 8025_webm only */
                 else
                     add_token(s, CAT_BUILTIN, word);
                 if (depth < 32) snprintf(calls[depth], sizeof(calls[depth]), "%s", word);
@@ -527,6 +530,7 @@ void ob_detect_version(const char *pak_path, const int *ids, int count, ob_detec
 
     out->version = count ? ids[count - 1] : -1;
     out->webm_files = 0;
+    out->sab_calls = 0;
     snprintf(out->reason, sizeof(out->reason), "could not read the pak, using the newest engine");
     if (count <= 0 || count > 16 || !pak_open(&pak, pak_path))
         return;
@@ -681,6 +685,16 @@ void ob_detect_version(const char *pak_path, const int *ids, int count, ob_detec
         snprintf(out->reason + l, sizeof(out->reason) - l, "; still %d unknown to %d: %s",
                  best_unknown, ids[best], example[best]);
     }
+    /* SAB extensions exist only in build 8025 (as 8025_webm) */
+    out->sab_calls = s.sab_calls;
+    if (s.sab_calls > 0)
+        for (v = 0; v < count; v++)
+            if (ids[v] == 8025)
+            {
+                out->version = 8025;
+                snprintf(out->reason, sizeof(out->reason), "the scripts call %d SAB extension functions (sab_*)",
+                         s.sab_calls);
+            }
 
     scan_free(&s);
     pak_close(&pak);

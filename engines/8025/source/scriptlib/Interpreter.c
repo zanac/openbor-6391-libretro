@@ -6,6 +6,7 @@
  * Copyright (c)  OpenBOR Team
  */
 
+#include "sab/sab_prof.h"
 #include "../openborscript/config.h"
 #include "Interpreter.h"
 #include "ImportCache.h"
@@ -290,7 +291,9 @@ HRESULT Interpreter_Call(Interpreter *pinterpreter) {
     if(currentCall->ptheJumpTarget) {
         pinterpreter->pCurrentInstruction = currentCall->ptheJumpTarget;
 
+        SAB_PROF_ENTER(pinterpreter, currentCall);
         hr = Interpreter_EvaluateCall(pinterpreter);
+        SAB_PROF_LEAVE();
     
     } else if(currentCall->functionRef) {
 
@@ -301,7 +304,9 @@ HRESULT Interpreter_Call(Interpreter *pinterpreter) {
 
         pretvar = currentCall->theVal;
 
+        SAB_PROF_ENTER(pinterpreter, currentCall);
         hr = currentCall->functionRef(parameters, &pretvar, paramCount);
+        SAB_PROF_LEAVE();
 
         if(FAILED(hr)) {
             

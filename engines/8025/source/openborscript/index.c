@@ -1893,6 +1893,14 @@ void Script_LoadSystemFunctions()
     List_InsertAfter(&theFunctionList,
                      (void *)openbor_getsaveinfo, "getsaveinfo");
 
+#ifdef SAB
+    {
+        /* SAB: native script extensions (engines/8025/sab) */
+        extern void sab_register_functions(List *list);
+        sab_register_functions(&theFunctionList);
+    }
+#endif
+
     //printf("Done!\n");
 
 }

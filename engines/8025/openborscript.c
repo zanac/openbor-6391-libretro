@@ -34,6 +34,9 @@
 #include "ImportCache.h"
 #include "models.h"
 #include "scriptcommon.h"
+#ifdef SAB
+#include "sab/sab_heap.h"
+#endif
 #include <limits.h>
 #include <stdint.h>
 
@@ -435,10 +438,13 @@ void Script_Global_Clear()
     }
     for(i = 0, List_Reset(&scriptheap); i < size; List_GotoNext(&scriptheap), i++)
     {
-        printf("%s\n", List_GetName(&scriptheap));
+        printf("%s\n", List_GetName(&scriptheap) ? List_GetName(&scriptheap) : "openbor_array");
         _freeheapnode(List_Retrieve(&scriptheap));
     }
     List_Clear(&scriptheap);
+#ifdef SAB
+    sab_heap_clear();
+#endif
     // clear the global list
     Varlist_Clear(&global_var_list);
 
@@ -992,6 +998,29 @@ HRESULT system_free(ScriptVariant **varlist , ScriptVariant **pretvar, int param
     {
         return E_FAIL;
     }
+#ifdef SAB
+    /* SAB: O(1) lookup of the allocation's list node (sab/sab_heap.h) */
+    {
+        Node *n = sab_heap_find(varlist[0]->ptrVal);
+
+        if(n)
+        {
+            void *p = varlist[0]->ptrVal;
+
+            _freeheapnode(p);
+            /* a script's ondestroy() may free something else: look again */
+            n = sab_heap_find(p);
+            if(n)
+            {
+                sab_heap_del(p);
+                scriptheap.current = n;
+                List_Remove(&scriptheap);
+            }
+            return S_OK;
+        }
+        return E_FAIL;
+    }
+#endif
     if(List_Includes(&scriptheap, varlist[0]->ptrVal))
     {
         _freeheapnode(List_Retrieve(&scriptheap));
@@ -14443,7 +14472,14 @@ HRESULT openbor_array(ScriptVariant **varlist , ScriptVariant **pretvar, int par
 
     Varlist_Init(array, size);
 
+#ifdef SAB
+    /* unnamed: no shared string-hash bucket (sab/sab_heap.h) */
+    List_GotoLast(&scriptheap);
+    List_InsertAfter(&scriptheap, (void *)(array), NULL);
+    sab_heap_add(array, scriptheap.current);
+#else
     List_InsertAfter(&scriptheap, (void *)(array), "openbor_array");
+#endif
     return S_OK;
 
 array_error:
@@ -14836,6 +14872,9 @@ HRESULT openbor_allocscreen(ScriptVariant **varlist , ScriptVariant **pretvar, i
         return E_FAIL;
     }
     List_InsertAfter(&scriptheap, (void *)((*pretvar)->ptrVal), "openbor_allocscreen");
+#ifdef SAB
+    sab_heap_add((void *)((*pretvar)->ptrVal), scriptheap.current);
+#endif
     return S_OK;
 
 allocscreen_error:
@@ -15929,6 +15968,9 @@ HRESULT openbor_loadsprite(ScriptVariant **varlist , ScriptVariant **pretvar, in
             spr->mask = mask;
         }
         List_InsertAfter(&scriptheap, (void *)spr, "openbor_loadsprite");
+#ifdef SAB
+    sab_heap_add((void *)spr, scriptheap.current);
+#endif
     }
     //else, it should return an empty value
     return S_OK;
@@ -16052,6 +16094,9 @@ HRESULT openbor_openanigif(ScriptVariant **varlist , ScriptVariant **pretvar, in
     {
         info->magic = anigif_magic;
         List_InsertAfter(&scriptheap, (void *)info, "openbor_openanigif");
+#ifdef SAB
+    sab_heap_add((void *)info, scriptheap.current);
+#endif
         ScriptVariant_ChangeType(*pretvar, VT_PTR);
         (*pretvar)->ptrVal = (VOID *)info;
         return S_OK;
@@ -16788,6 +16833,9 @@ HRESULT openbor_allocscript(ScriptVariant **varlist , ScriptVariant **pretvar, i
     Script_Init(ns, name, comment, 1);
 
     List_InsertAfter(&scriptheap, (void *)ns, "openbor_allocscript");
+#ifdef SAB
+    sab_heap_add((void *)ns, scriptheap.current);
+#endif
 
     ScriptVariant_ChangeType(*pretvar, VT_PTR);
     (*pretvar)->ptrVal = (VOID *)ns;
@@ -17123,3 +17171,8 @@ gsi_error:
     *pretvar = NULL;
     return E_FAIL;
 }
+
+#ifdef SAB
+/* SAB: native script extensions of the 8025_webm engine (sab/README.md) */
+#include "sab/sab.c"
+#endif

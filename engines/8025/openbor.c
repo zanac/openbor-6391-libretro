@@ -51551,6 +51551,13 @@ void update(int ingame, int usevwait)
             if(ingame == 1)
             {
                 update_scroller();
+#ifdef SAB
+                {
+                    /* SAB camera override (sab/sab.c) */
+                    extern void sab_camera_apply(void);
+                    sab_camera_apply();
+                }
+#endif
                 if(!freezeall)
                 {
                     int all_p_alive = 0;
