@@ -43,6 +43,10 @@ Measured on the Slaps And Beans Western level (9000 frames, headless):
 | `sab_profile(on)` | `1`: reset the counters and start; `0`: stop |
 | `sab_profile_dump(n)` | print to the log the `n` functions (script or native) with the most self time: self ms, total ms, calls, µs per call |
 
+While the profiler is on, a native function that fails (the interpreter's
+"Script function 'x' returned an exception") also prints the script call
+stack, outermost first (`script stack (sab_profile): a > b > c`).
+
 Script functions are named from the import cache (`script@<address>` for
 functions of the calling script itself).
 
