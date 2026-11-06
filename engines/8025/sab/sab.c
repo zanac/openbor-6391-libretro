@@ -271,6 +271,27 @@ static void sab_prof_enter(const char *name)
     f->child = 0;
 }
 
+/*
+ * Script call stack at a runtime error (printed by the interpreter after a
+ * native function failed): the profiler's frames, outermost first. Empty
+ * unless sab_profile(1) is on.
+ */
+void sab_prof_print_stack(void)
+{
+    int i, n = sab_prof_depth < SAB_PROF_STACK ? sab_prof_depth : SAB_PROF_STACK;
+
+    if(!sab_prof_on || n <= 0)
+    {
+        return;
+    }
+    printf(" script stack (sab_profile):");
+    for(i = 0; i < n; i++)
+    {
+        printf(" %s%s", i ? "> " : "", sab_prof_stack[i].entry >= 0 ? sab_prof_tab[sab_prof_stack[i].entry].name : "?");
+    }
+    printf("\n");
+}
+
 void sab_prof_leave(void)
 {
     sab_prof_frame *f;

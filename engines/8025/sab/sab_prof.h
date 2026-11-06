@@ -13,12 +13,16 @@ struct Interpreter;
 struct Instruction;
 void sab_prof_enter_call(void *interpreter, void *call);
 void sab_prof_leave(void);
+/* the script call stack, at a runtime error (profiler on) */
+void sab_prof_print_stack(void);
 /* call: the CALL instruction (script target or native function) */
 #define SAB_PROF_ENTER(interp, call) do { if(sab_prof_on) sab_prof_enter_call(interp, call); } while(0)
 #define SAB_PROF_LEAVE()     do { if(sab_prof_on) sab_prof_leave(); } while(0)
+#define SAB_PROF_STACK_PRINT() sab_prof_print_stack()
 #else
 #define SAB_PROF_ENTER(interp, call) do { } while(0)
 #define SAB_PROF_LEAVE()     do { } while(0)
+#define SAB_PROF_STACK_PRINT() do { } while(0)
 #endif
 
 #endif

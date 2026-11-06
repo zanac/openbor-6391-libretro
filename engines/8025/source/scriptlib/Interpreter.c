@@ -317,6 +317,7 @@ HRESULT Interpreter_Call(Interpreter *pinterpreter) {
             List_Includes(pinterpreter->ptheFunctionList, currentCall->functionRef);
 
             printf("Script function '%s' returned an exception. See any preceding error messages above for details.\n", List_GetName(pinterpreter->ptheFunctionList));
+            SAB_PROF_STACK_PRINT();
 
             if(paramCount > 0) {
                 printf(" parameters: ");
