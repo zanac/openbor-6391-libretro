@@ -5,3 +5,4 @@
 *.dylib
 test/frontend
 obj/
+__pycache__/
