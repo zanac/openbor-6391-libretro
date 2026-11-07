@@ -61,6 +61,7 @@
 #include <time.h>
 #include <math.h>
 #include "sab/sab_prof.h"
+#include "png.h"
 
 /* ================================================================ helpers */
 
@@ -1737,6 +1738,730 @@ void sab_postfx_apply(s_screen *scr)
     sab_sq_apply(px, W, H);
 }
 
+
+/* ===================================================== scrolling background */
+
+/*
+ * Unity's ScrollRecycler (docs of the mod: level2-train.md): layers of
+ * sprites moved every frame by dt x v (per layer of a recycler) and
+ * recycled to the right when they leave the camera on the left. The file
+ * (pipeline/scroll_build.py):
+ *
+ *   level <x0> <top>         game x of the level picture's column 0, y + z of row 0
+ *   image <n> <file>
+ *   layer <index> <owner> <pad> "<path>"
+ *   recycler <index> <active> <margin> <n> <layer> <v> ... "<path>"
+ *   piece <layer> <image> <col> <row> <depth> <blend> <order> <group> <x> <half width> <on> "<path>"
+ *   emitter <owner> <x> <y> <z> <depth> <dx> <dy> <dz> <ux> <uy> <uz> <vx> <vy> <vz> <radius> <rate>
+ *           <life> <speed> <width> <length> <alpha min> <alpha max> "<path>"
+ *   end
+ *
+ * An emitter is a particle system shown with its owner recycler: particles
+ * start on the disc of the radius around (x, y, z) (axes u, v), fly along
+ * d at the speed for the lifetime, and are drawn as white streaks (alpha
+ * between the two values) of the length back along d, at the depth.
+ *
+ * col, row: image top-left in level pixels at rest; x, half width: world
+ * units (SAB_SC_PPU pixels each). A piece is drawn when it is on and its
+ * layer's owner recycler (if any) is active. group 0 is queued below the
+ * level's bglayers (z MIN_INT, negative sort ids in file order), 1 at its
+ * depth (sorted with the entities), 2 below the fglayers (FRONTPANEL_Z).
+ *
+ * The images are RGBA PNGs drawn by the core itself (sprite queue
+ * callbacks, 32-bit screens): per-pixel alpha, blend 1 additive, 2 multiply
+ * (the image is the multiplier). The engine's sprites are 8-bit indexed.
+ */
+
+#define SAB_SC_PPU 20.0f
+#define SAB_SC_CAMW 32.0f       /* CameraManager.WORLD_CAMERA_WIDTH */
+#define SAB_SC_MAXV 32
+
+typedef struct
+{
+    int w, h;
+    unsigned char *px;          /* RGBA */
+} sab_sc_image;
+
+typedef struct
+{
+    int layer, img, col, row, depth, blend, group, on, w, h;
+    float x0, hw, dx;
+    char *path;
+} sab_sc_piece;
+
+typedef struct
+{
+    int owner, pad;
+    float off, ox, oy;          /* recycler motion; script offset (sab_scroll_offset) */
+    char *path;
+} sab_sc_layer;
+
+typedef struct
+{
+    int active, active0, margin, n;
+    int layer[SAB_SC_MAXV];
+    float v[SAB_SC_MAXV];
+    char *path;
+} sab_sc_rec;
+
+#define SAB_SC_MAXP 256
+
+typedef struct
+{
+    float x, y, z, a, t;
+} sab_sc_particle;
+
+typedef struct
+{
+    int owner, depth, n;
+    float x, y, z, d[3], u[3], v[3], radius, rate, life, speed, width, length, amin, amax, acc;
+    sab_sc_particle p[SAB_SC_MAXP];
+} sab_sc_emitter;
+
+static struct
+{
+    char path[256];
+    int nimg, nlayer, nrec, npiece, nemit, ok;
+    float x0, top;              /* "level <x0> <top>": game x of column 0, y + z of row 0 */
+    sab_sc_emitter *emit;
+    sab_sc_image *img;
+    sab_sc_layer *layer;
+    sab_sc_rec *rec;
+    sab_sc_piece *piece;
+} sab_sc;
+
+static void sab_sc_free(void)
+{
+    int i;
+
+    for(i = 0; i < sab_sc.nimg; i++)
+    {
+        free(sab_sc.img[i].px);
+    }
+    for(i = 0; i < sab_sc.nlayer; i++)
+    {
+        free(sab_sc.layer[i].path);
+    }
+    for(i = 0; i < sab_sc.nrec; i++)
+    {
+        free(sab_sc.rec[i].path);
+    }
+    for(i = 0; i < sab_sc.npiece; i++)
+    {
+        free(sab_sc.piece[i].path);
+    }
+    free(sab_sc.img);
+    free(sab_sc.layer);
+    free(sab_sc.rec);
+    free(sab_sc.piece);
+    free(sab_sc.emit);
+    memset(&sab_sc, 0, sizeof(sab_sc));
+}
+
+/* the quoted tail of a line ("<path>"), or "" */
+static char *sab_sc_quoted(const char *line)
+{
+    const char *a = strchr(line, '"'), *b;
+    char *r;
+
+    if(!a || !(b = strrchr(line, '"')) || b <= a)
+    {
+        return strdup("");
+    }
+    r = malloc(b - a);
+    memcpy(r, a + 1, b - a - 1);
+    r[b - a - 1] = 0;
+    return r;
+}
+
+static void sab_sc_reset(void)
+{
+    int i;
+
+    for(i = 0; i < sab_sc.nlayer; i++)
+    {
+        sab_sc.layer[i].off = 0;
+        sab_sc.layer[i].ox = 0;
+        sab_sc.layer[i].oy = 0;
+    }
+    for(i = 0; i < sab_sc.nrec; i++)
+    {
+        sab_sc.rec[i].active = sab_sc.rec[i].active0;
+    }
+    for(i = 0; i < sab_sc.nemit; i++)
+    {
+        sab_sc.emit[i].n = 0;
+        sab_sc.emit[i].acc = 0;
+    }
+}
+
+/* an RGBA PNG of the pak */
+static int sab_sc_load_png(const char *file, sab_sc_image *im)
+{
+    size_t len;
+    char *buf = sab_read_file(file, &len);
+    png_image pi;
+
+    if(!buf)
+    {
+        return 0;
+    }
+    memset(&pi, 0, sizeof(pi));
+    pi.version = PNG_IMAGE_VERSION;
+    if(!png_image_begin_read_from_memory(&pi, buf, len))
+    {
+        free(buf);
+        return 0;
+    }
+    pi.format = PNG_FORMAT_RGBA;
+    im->w = pi.width;
+    im->h = pi.height;
+    im->px = malloc(PNG_IMAGE_SIZE(pi));
+    if(!im->px || !png_image_finish_read(&pi, NULL, im->px, 0, NULL))
+    {
+        free(im->px);
+        im->px = NULL;
+        png_image_free(&pi);
+        free(buf);
+        return 0;
+    }
+    free(buf);
+    return 1;
+}
+
+static int sab_sc_parse(const char *path)
+{
+    size_t len;
+    char *buf = sab_read_file(path, &len), *line, *next;
+    int pass;
+
+    if(!buf)
+    {
+        printf("sab_scroll_load: cannot open %s\n", path);
+        return 0;
+    }
+    for(pass = 0; pass < 2; pass++)
+    {
+        int ni = 0, nl = 0, nr = 0, np = 0, ne = 0;
+        char *copy = strdup(buf);
+
+        for(line = copy; line && *line; line = next)
+        {
+            char kw[16] = "";
+
+            next = strpbrk(line, "\r\n");
+            if(next)
+            {
+                *next++ = 0;
+                while(*next == '\r' || *next == '\n')
+                {
+                    next++;
+                }
+            }
+            if(sscanf(line, "%15s", kw) != 1 || kw[0] == '#')
+            {
+                continue;
+            }
+            if(!strcmp(kw, "level"))
+            {
+                if(pass == 1)
+                {
+                    sscanf(line, "level %f %f", &sab_sc.x0, &sab_sc.top);
+                }
+            }
+            else if(!strcmp(kw, "image"))
+            {
+                int n;
+                char file[256];
+
+                if(sscanf(line, "image %d %255s", &n, file) == 2)
+                {
+                    if(pass == 0)
+                    {
+                        if(n + 1 > ni)
+                        {
+                            ni = n + 1;
+                        }
+                    }
+                    else if(n >= 0 && n < sab_sc.nimg)
+                    {
+                        if(!sab_sc_load_png(file, &sab_sc.img[n]))
+                        {
+                            printf("sab_scroll_load: cannot load %s\n", file);
+                        }
+                    }
+                }
+            }
+            else if(!strcmp(kw, "layer"))
+            {
+                if(pass == 1)
+                {
+                    sab_sc_layer *l = &sab_sc.layer[nl];
+
+                    sscanf(line, "layer %*d %d %d", &l->owner, &l->pad);
+                    l->path = sab_sc_quoted(line);
+                }
+                nl++;
+            }
+            else if(!strcmp(kw, "recycler"))
+            {
+                if(pass == 1)
+                {
+                    sab_sc_rec *r = &sab_sc.rec[nr];
+                    char *p = line;
+                    int k, used;
+
+                    sscanf(p, "recycler %*d %d %d %d%n", &r->active0, &r->margin, &r->n, &used);
+                    p += used;
+                    if(r->n > SAB_SC_MAXV)
+                    {
+                        r->n = SAB_SC_MAXV;
+                    }
+                    for(k = 0; k < r->n; k++)
+                    {
+                        sscanf(p, "%d %f%n", &r->layer[k], &r->v[k], &used);
+                        p += used;
+                    }
+                    r->path = sab_sc_quoted(line);
+                }
+                nr++;
+            }
+            else if(!strcmp(kw, "emitter"))
+            {
+                if(pass == 1)
+                {
+                    sab_sc_emitter *e = &sab_sc.emit[ne];
+
+                    sscanf(line, "emitter %d %f %f %f %d %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f",
+                           &e->owner, &e->x, &e->y, &e->z, &e->depth, &e->d[0], &e->d[1], &e->d[2], &e->u[0],
+                           &e->u[1], &e->u[2], &e->v[0], &e->v[1], &e->v[2], &e->radius, &e->rate, &e->life,
+                           &e->speed, &e->width, &e->length, &e->amin, &e->amax);
+                }
+                ne++;
+            }
+            else if(!strcmp(kw, "piece"))
+            {
+                if(pass == 1)
+                {
+                    sab_sc_piece *q = &sab_sc.piece[np];
+                    int order;
+
+                    sscanf(line, "piece %d %d %d %d %d %d %d %d %f %f %d", &q->layer, &q->img, &q->col, &q->row,
+                           &q->depth, &q->blend, &order, &q->group, &q->x0, &q->hw, &q->on);
+                    q->path = sab_sc_quoted(line);
+                }
+                np++;
+            }
+        }
+        free(copy);
+        if(pass == 0)
+        {
+            sab_sc.nimg = ni;
+            sab_sc.nlayer = nl;
+            sab_sc.nrec = nr;
+            sab_sc.npiece = np;
+            sab_sc.nemit = ne;
+            sab_sc.emit = calloc(ne ? ne : 1, sizeof(*sab_sc.emit));
+            sab_sc.img = calloc(ni ? ni : 1, sizeof(*sab_sc.img));
+            sab_sc.layer = calloc(nl ? nl : 1, sizeof(*sab_sc.layer));
+            sab_sc.rec = calloc(nr ? nr : 1, sizeof(*sab_sc.rec));
+            sab_sc.piece = calloc(np ? np : 1, sizeof(*sab_sc.piece));
+        }
+    }
+    free(buf);
+    {
+        int i;
+
+        for(i = 0; i < sab_sc.npiece; i++)
+        {
+            sab_sc_piece *q = &sab_sc.piece[i];
+            sab_sc_image *im = (q->img >= 0 && q->img < sab_sc.nimg) ? &sab_sc.img[q->img] : NULL;
+
+            if(q->layer < 0 || q->layer >= sab_sc.nlayer)
+            {
+                q->layer = 0;
+            }
+            if(!im || !im->px)
+            {
+                q->on = 0;
+                q->img = -1;
+            }
+            q->w = im ? im->w : 0;
+            q->h = im ? im->h : 0;
+        }
+    }
+    strncpy(sab_sc.path, path, sizeof(sab_sc.path) - 1);
+    sab_sc.ok = 1;
+    return 1;
+}
+
+/* sprite queue callback: the piece's image at (x, y) of a 32-bit screen */
+static void sab_sc_blit(s_screen *scr, int x, int y, void *arg)
+{
+    sab_sc_piece *q = (sab_sc_piece *)arg;
+    sab_sc_image *im;
+    int i, j, x0, y0, x1, y1;
+
+    if(!scr || scr->pixelformat != PIXEL_32 || q->img < 0)
+    {
+        return;
+    }
+    im = &sab_sc.img[q->img];
+    x0 = x < 0 ? 0 : x;
+    y0 = y < 0 ? 0 : y;
+    x1 = x + im->w > scr->width ? scr->width : x + im->w;
+    y1 = y + im->h > scr->height ? scr->height : y + im->h;
+    for(j = y0; j < y1; j++)
+    {
+        const unsigned char *s = im->px + ((size_t)(j - y) * im->w + (x0 - x)) * 4;
+        unsigned char *d = (unsigned char *)scr->data + ((size_t)j * scr->width + x0) * 4;
+
+        for(i = x0; i < x1; i++, s += 4, d += 4)
+        {
+            unsigned a = s[3];
+
+            if(!a)
+            {
+                continue;
+            }
+            if(q->blend == 2)
+            {
+                d[0] = (unsigned char)((d[0] * s[0] + 127) / 255);
+                d[1] = (unsigned char)((d[1] * s[1] + 127) / 255);
+                d[2] = (unsigned char)((d[2] * s[2] + 127) / 255);
+            }
+            else if(q->blend == 1)
+            {
+                unsigned r = d[0] + (s[0] * a + 127) / 255, g = d[1] + (s[1] * a + 127) / 255,
+                         b = d[2] + (s[2] * a + 127) / 255;
+
+                d[0] = r > 255 ? 255 : r;
+                d[1] = g > 255 ? 255 : g;
+                d[2] = b > 255 ? 255 : b;
+            }
+            else if(a == 255)
+            {
+                d[0] = s[0];
+                d[1] = s[1];
+                d[2] = s[2];
+            }
+            else
+            {
+                d[0] = (unsigned char)((s[0] * a + d[0] * (255 - a) + 127) / 255);
+                d[1] = (unsigned char)((s[1] * a + d[1] * (255 - a) + 127) / 255);
+                d[2] = (unsigned char)((s[2] * a + d[2] * (255 - a) + 127) / 255);
+            }
+        }
+    }
+}
+
+/* sprite queue callback: the streaks of an emitter (stretched billboards
+   along -x or +x: horizontal, length and width in world units) */
+static void sab_sc_streaks(s_screen *scr, int x, int y, void *arg)
+{
+    sab_sc_emitter *e = (sab_sc_emitter *)arg;
+    int k, i, j, w;
+
+    if(!scr || scr->pixelformat != PIXEL_32)
+    {
+        return;
+    }
+    w = (int)(e->width * SAB_SC_PPU + 0.5f);
+    if(w < 1)
+    {
+        w = 1;
+    }
+    for(k = 0; k < e->n; k++)
+    {
+        const sab_sc_particle *p = &e->p[k];
+        /* the billboard reaches back from the particle, against its motion */
+        float xa = p->x, xb = p->x - e->d[0] * e->length;
+        int c0 = x + (int)floorf(((xa < xb ? xa : xb) - sab_sc.x0) * SAB_SC_PPU);
+        int c1 = x + (int)floorf(((xa < xb ? xb : xa) - sab_sc.x0) * SAB_SC_PPU);
+        int r0 = y + (int)floorf((sab_sc.top - (p->y + p->z)) * SAB_SC_PPU - w * 0.5f + 0.5f);
+        unsigned a = (unsigned)(p->a * 255.0f + 0.5f);
+
+        if(!a)
+        {
+            continue;
+        }
+        if(c0 < 0)
+        {
+            c0 = 0;
+        }
+        if(c1 > scr->width)
+        {
+            c1 = scr->width;
+        }
+        for(j = r0; j < r0 + w; j++)
+        {
+            unsigned char *d;
+
+            if(j < 0 || j >= scr->height)
+            {
+                continue;
+            }
+            d = (unsigned char *)scr->data + ((size_t)j * scr->width + c0) * 4;
+            for(i = c0; i < c1; i++, d += 4)
+            {
+                d[0] = (unsigned char)((255 * a + d[0] * (255 - a) + 127) / 255);
+                d[1] = (unsigned char)((255 * a + d[1] * (255 - a) + 127) / 255);
+                d[2] = (unsigned char)((255 * a + d[2] * (255 - a) + 127) / 255);
+            }
+        }
+    }
+}
+
+/* own generator: the engine's random sequence is left alone */
+static unsigned sab_sc_seed = 12345u;
+
+static float sab_sc_rand01(void)
+{
+    sab_sc_seed = sab_sc_seed * 1664525u + 1013904223u;
+    return (float)(sab_sc_seed >> 8) / 16777216.0f;
+}
+
+//sab_scroll_load(path): "" unloads
+HRESULT sab_scroll_load(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    const char *path = sab_arg_str(varlist, 0, paramCount);
+    int i;
+
+    if(!path)
+    {
+        printf("Function requires a path: sab_scroll_load(path)\n");
+        *pretvar = NULL;
+        return E_FAIL;
+    }
+    if(sab_sc.ok && !strcmp(sab_sc.path, path))
+    {
+        /* same file: back to the rest state */
+        sab_sc_reset();
+        for(i = 0; i < sab_sc.npiece; i++)
+        {
+            sab_sc.piece[i].dx = 0;
+        }
+        sab_ret_long(pretvar, 1);
+        return S_OK;
+    }
+    sab_sc_free();
+    if(!path[0])
+    {
+        sab_ret_long(pretvar, 1);
+        return S_OK;
+    }
+    sab_ret_long(pretvar, sab_sc_parse(path));
+    sab_sc_reset();
+    return S_OK;
+}
+
+/* the pieces' "on" flags of the file are reloaded with the file only: they
+   change through sab_scroll_show */
+
+//sab_scroll_active(path, on): a recycler (its object's active state)
+HRESULT sab_scroll_active(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    const char *path = sab_arg_str(varlist, 0, paramCount);
+    LONG on = 0;
+    int i, found = 0;
+
+    sab_arg_long(varlist, 1, paramCount, &on);
+    for(i = 0; path && i < sab_sc.nrec; i++)
+    {
+        if(!strcmp(sab_sc.rec[i].path, path))
+        {
+            sab_sc.rec[i].active = on ? 1 : 0;
+            found = 1;
+        }
+    }
+    sab_ret_long(pretvar, found);
+    return S_OK;
+}
+
+//sab_scroll_show(path, on): every piece at or below that object
+HRESULT sab_scroll_show(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    const char *path = sab_arg_str(varlist, 0, paramCount);
+    LONG on = 0;
+    int i, found = 0;
+    size_t ln;
+
+    sab_arg_long(varlist, 1, paramCount, &on);
+    if(!path)
+    {
+        sab_ret_long(pretvar, 0);
+        return S_OK;
+    }
+    ln = strlen(path);
+    for(i = 0; i < sab_sc.npiece; i++)
+    {
+        const char *p = sab_sc.piece[i].path;
+
+        if(!strncmp(p, path, ln) && (p[ln] == 0 || p[ln] == '/'))
+        {
+            sab_sc.piece[i].on = on ? 1 : 0;
+            found++;
+        }
+    }
+    sab_ret_long(pretvar, found);
+    return S_OK;
+}
+
+//sab_scroll_offset(path, dx, dy): a layer drawn moved by (dx, dy) world units
+//(y up), e.g. a rigid layer no recycler moves
+HRESULT sab_scroll_offset(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    const char *path = sab_arg_str(varlist, 0, paramCount);
+    DOUBLE dx = 0, dy = 0;
+    int i, found = 0;
+
+    sab_arg_double(varlist, 1, paramCount, &dx);
+    sab_arg_double(varlist, 2, paramCount, &dy);
+    for(i = 0; path && i < sab_sc.nlayer; i++)
+    {
+        if(!strcmp(sab_sc.layer[i].path, path))
+        {
+            sab_sc.layer[i].ox = (float)dx;
+            sab_sc.layer[i].oy = (float)dy;
+            found = 1;
+        }
+    }
+    sab_ret_long(pretvar, found);
+    return S_OK;
+}
+
+//sab_scroll_frame(dt, camleft): moves and recycles the active recyclers'
+//layers (camleft: world x of the screen's left edge), then queues the shown
+//pieces; once per frame
+HRESULT sab_scroll_frame(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    DOUBLE dt = 0, cl = 0;
+    int i, k, j;
+
+    *pretvar = NULL;
+    if(!sab_sc.ok || !sab_arg_double(varlist, 0, paramCount, &dt) || !sab_arg_double(varlist, 1, paramCount, &cl))
+    {
+        return S_OK;
+    }
+    for(i = 0; i < sab_sc.nrec; i++)
+    {
+        sab_sc_rec *r = &sab_sc.rec[i];
+
+        if(!r->active)
+        {
+            continue;
+        }
+        for(k = 0; k < r->n; k++)
+        {
+            int li = r->layer[k];
+            sab_sc_layer *l;
+
+            if(li < 0 || li >= sab_sc.nlayer)
+            {
+                continue;
+            }
+            l = &sab_sc.layer[li];
+            l->off += (float)dt * r->v[k];
+            /* Layer.Recylce(extraMargin) */
+            for(j = 0; j < sab_sc.npiece; j++)
+            {
+                sab_sc_piece *q = &sab_sc.piece[j];
+                float x;
+
+                if(q->layer != li)
+                {
+                    continue;
+                }
+                x = q->x0 + l->off + q->dx;
+                if(x < (float)cl - r->margin - q->hw - l->pad)
+                {
+                    q->dx += SAB_SC_CAMW + r->margin * 2 + q->hw + l->pad;
+                }
+            }
+        }
+    }
+    /* the emitters of the active recyclers: emission, motion, death */
+    for(i = 0; i < sab_sc.nemit; i++)
+    {
+        sab_sc_emitter *e = &sab_sc.emit[i];
+
+        if(e->owner >= 0 && e->owner < sab_sc.nrec && !sab_sc.rec[e->owner].active)
+        {
+            continue;
+        }
+        for(k = 0; k < e->n; k++)
+        {
+            sab_sc_particle *p = &e->p[k];
+
+            p->t += (float)dt;
+            if(p->t >= e->life)
+            {
+                e->p[k--] = e->p[--e->n];
+                continue;
+            }
+            p->x += e->d[0] * e->speed * (float)dt;
+            p->y += e->d[1] * e->speed * (float)dt;
+            p->z += e->d[2] * e->speed * (float)dt;
+        }
+        e->acc += (float)dt * e->rate;
+        while(e->acc >= 1.0f)
+        {
+            float r = e->radius * sqrtf(sab_sc_rand01()), th = 6.2831853f * sab_sc_rand01();
+            float cu = r * cosf(th), cv = r * sinf(th);
+            sab_sc_particle *p;
+
+            e->acc -= 1.0f;
+            if(e->n >= SAB_SC_MAXP)
+            {
+                continue;
+            }
+            p = &e->p[e->n++];
+            p->x = e->x + e->u[0] * cu + e->v[0] * cv;
+            p->y = e->y + e->u[1] * cu + e->v[1] * cv;
+            p->z = e->z + e->u[2] * cu + e->v[2] * cv;
+            p->a = e->amin + (e->amax - e->amin) * sab_sc_rand01();
+            p->t = 0;
+        }
+        /* screen origin of the level: x = -advancex, row of y + z = 0 */
+        /* (x, y): screen place of the level picture's top-left */
+        spriteq_add_callback((int)floorf(-advancex + 0.5f), (int)floorf(-advancey + 0.5f), e->depth, 0, sab_sc_streaks, e);
+    }
+    for(j = 0; j < sab_sc.npiece; j++)
+    {
+        sab_sc_piece *q = &sab_sc.piece[j];
+        sab_sc_layer *l = &sab_sc.layer[q->layer];
+        int x, y, z, sid;
+
+        if(!q->on || q->img < 0 || (l->owner >= 0 && l->owner < sab_sc.nrec && !sab_sc.rec[l->owner].active))
+        {
+            continue;
+        }
+        x = (int)floorf(q->col + (l->off + q->dx + l->ox) * SAB_SC_PPU - advancex + 0.5f);
+        y = (int)floorf(q->row - l->oy * SAB_SC_PPU - advancey + 0.5f);
+        if(x >= videomodes.hRes || x + q->w <= 0 || y >= videomodes.vRes || y + q->h <= 0)
+        {
+            continue;
+        }
+        if(q->group == 0)
+        {
+            z = MIN_INT;
+            sid = -1000000 + j;
+        }
+        else if(q->group == 1)
+        {
+            z = q->depth;
+            sid = 0;
+        }
+        else
+        {
+            z = FRONTPANEL_Z;
+            sid = -1000000 + j;
+        }
+        spriteq_add_callback(x, y, z, sid, sab_sc_blit, q);
+    }
+    return S_OK;
+}
+
 /* ============================================================ registration */
 
 void sab_register_functions(List *list)
@@ -1757,4 +2482,9 @@ void sab_register_functions(List *list)
     List_InsertAfter(list, (void *)sab_postfx_bullet, "sab_postfx_bullet");
     List_InsertAfter(list, (void *)sab_postfx_lofi, "sab_postfx_lofi");
     List_InsertAfter(list, (void *)sab_postfx_screenquad, "sab_postfx_screenquad");
+    List_InsertAfter(list, (void *)sab_scroll_load, "sab_scroll_load");
+    List_InsertAfter(list, (void *)sab_scroll_active, "sab_scroll_active");
+    List_InsertAfter(list, (void *)sab_scroll_show, "sab_scroll_show");
+    List_InsertAfter(list, (void *)sab_scroll_frame, "sab_scroll_frame");
+    List_InsertAfter(list, (void *)sab_scroll_offset, "sab_scroll_offset");
 }

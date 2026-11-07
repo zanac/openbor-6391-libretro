@@ -26,6 +26,9 @@
 #define         SQT_CIRCLE      4
 #define         SQT_SHADOW      5 //current unused, use common sprite method instead
 #define         SQT_SCREEN      6
+#ifdef SAB
+#define         SQT_CALLBACK    7   // SAB: a C function draws at its place in the queue
+#endif
 
 #define         SQ_MAX_PARAMS   3
 
@@ -39,6 +42,9 @@ typedef struct
     s_drawmethod drawmethod;
     int     params[SQ_MAX_PARAMS];
     int     type;
+#ifdef SAB
+    void  (*cb)(s_screen *screen, int x, int y, void *arg);
+#endif
 } qstruct;
 
 static qstruct queue[MAXQSPRITES];
@@ -122,6 +128,27 @@ void spriteq_add_sprite(int x, int y, int z, int id, s_drawmethod *pdrawmethod, 
     order[spritequeue_len] = &queue[spritequeue_len];
     ++spritequeue_len;
 }
+
+#ifdef SAB
+// SAB: cb(screen, x, y, arg) is called when the queue reaches (z, sortid)
+void spriteq_add_callback(int x, int y, int z, int sortid, void (*cb)(s_screen *screen, int x, int y, void *arg), void *arg)
+{
+    if(spritequeue_len >= MAXQSPRITES || !cb)
+    {
+        return;
+    }
+    queue[spritequeue_len].type = SQT_CALLBACK;
+    queue[spritequeue_len].x = x;
+    queue[spritequeue_len].y = y;
+    queue[spritequeue_len].z = z;
+    queue[spritequeue_len].sortid = sortid;
+    queue[spritequeue_len].frame = arg;
+    queue[spritequeue_len].cb = cb;
+    queue[spritequeue_len].drawmethod.config &= ~DRAWMETHOD_CONFIG_ENABLED;
+    order[spritequeue_len] = &queue[spritequeue_len];
+    ++spritequeue_len;
+}
+#endif
 
 void spriteq_add_screen(int x, int y, int z, s_screen *ps, s_drawmethod *pdrawmethod, int sortid)
 {
@@ -327,6 +354,11 @@ void spriteq_draw(s_screen *screen, int newonly, int minz, int maxz, int dx, int
         case SQT_SCREEN: // draw a screen instead of sprite
             putscreen(screen, (s_screen *)(order[i]->frame), x, y, &(order[i]->drawmethod));
             break;
+#ifdef SAB
+        case SQT_CALLBACK:
+            order[i]->cb(screen, x, y, order[i]->frame);
+            break;
+#endif
         case SQT_DOT:
             putpixel(x, y, order[i]->params[0], screen, &(order[i]->drawmethod));
             break;

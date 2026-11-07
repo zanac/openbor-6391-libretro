@@ -19,7 +19,8 @@ files are all inside `#ifdef SAB`: `openborscript.c` (include, `free()`,
 `array()` and the other heap allocations), `source/openborscript/index.c`
 (registration), `source/scriptlib/Interpreter.c` (profiler),
 `source/scriptlib/ImportCache.c` (function names for the profiler),
-`openbor.c` (camera, after `update_scroller()`).
+`openbor.c` (camera, after `update_scroller()`), `source/gamelib/spriteq.c`
+(a queue entry that calls a C function: `spriteq_add_callback`).
 
 ## Engine change: O(1) `free()`
 
@@ -103,3 +104,45 @@ Cost: about 3.5 ms per 640×360 frame on the build machine (one thread).
 The Slaps And Beans mod uses it for the Western camera chain (its
 `docs/postfx.md`); against that document's exact chain the engine output
 differs by 0.5 levels on average (max 6).
+
+### Scrolling backgrounds
+
+Unity's `ScrollRecycler` (an endless background: layers of sprites moving
+left at their own speed, each sprite moved to the right again when it leaves
+the camera on the left), drawn by the core: the images are RGBA PNGs blitted
+with per-pixel alpha on the 32-bit screen (the engine's own sprites are
+8-bit indexed), each at its place in the sprite queue. One scroll file is
+loaded at a time.
+
+```
+level <x0> <top>                        world x of the level picture's column 0, y + z of its row 0
+image <n> <file>                        RGBA PNG of the pak
+layer <index> <owner> <pad> "<path>"    owner: the recycler shown with it (-1: always shown)
+recycler <index> <active> <margin> <n> <layer> <v> ... "<path>"
+piece <layer> <image> <col> <row> <depth> <blend> <order> <group> <x> <half width> <on> "<path>"
+emitter <owner> <x> <y> <z> <depth> <dx> <dy> <dz> <ux> <uy> <uz> <vx> <vy> <vz> <radius> <rate>
+        <life> <speed> <width> <length> <alpha min> <alpha max> "<path>"
+end
+```
+
+Units: 20 pixels per world unit, y up, screen row = 20 · (top − (y + z)).
+Every frame an active recycler moves each of its layers by `dt · v`, then
+every piece of the layer whose world x is left of the camera's left edge
+− margin − half width − pad moves right by 32 + 2 · margin + half width +
+pad (the camera is 32 units wide). A piece is drawn when it is on and its
+layer's owner is active (or it has none): group 0 below the level's
+bglayers (z `MIN_INT`, file order), group 1 at its depth (sorted with the
+entities), group 2 below the fglayers (`FRONTPANEL_Z`); blend 0 alpha, 1
+additive, 2 multiply. An emitter (shown with its owner) starts `rate`
+particles per second on the disc of `radius` around (x, y, z) (axes u, v),
+moves them along d at `speed` for `life` seconds and draws each as a white
+horizontal streak `length` long back along d, `width` thick, alpha random in
+[min, max], at its depth.
+
+| Function | Description |
+| --- | --- |
+| `sab_scroll_load(path)` | load a scroll file (`""` unloads); the same path again resets it (layers back, recyclers to their file state); returns 1 on success |
+| `sab_scroll_active(path, on)` | switch a recycler (its object's active state); 1 if found |
+| `sab_scroll_show(path, on)` | show / hide every piece at or below that object path; returns the count |
+| `sab_scroll_offset(path, dx, dy)` | draw a layer moved by (dx, dy) world units (a rigid layer no recycler moves, e.g. a shaking vehicle) |
+| `sab_scroll_frame(dt, camleft)` | once per frame: move and recycle (camleft: world x of the screen's left edge), then queue the shown pieces |
