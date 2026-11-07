@@ -45,6 +45,17 @@
  *                                     intensity 0 = off
  *     sab_postfx_zsplit(z)            sprite-queue z where the grading stops
  *                                     (default HUD_Z)
+ *     sab_postfx_bullet(vig, darkness, sharpness, contrast, red, density, box, aspect)
+ *                                     the duel's bullet time after the bloom
+ *                                     (docs/postfx.md 5): CC_ContrastVignette
+ *                                     (vig 1, centre (0.71, 0.5), green/blue
+ *                                     coeff 1, edge 0), Colorful.Letterbox
+ *                                     (box 1, black, aspect), Colorful
+ *                                     PhotoFilter colour (1, 0.5, 0.2) at
+ *                                     density (> 0.01), and the LoFiPalette
+ *                                     with it; all 0 = off
+ *     sab_postfx_lofi(lut, amount)    the LoFiPalette table: a 16^3 RGB file
+ *                                     (node order as above), point sampled
  */
 
 #include <time.h>
@@ -1073,6 +1084,11 @@ static unsigned char *sab_pfx_lut = NULL;
 static unsigned char sab_pfx_curves[3][256];
 static double sab_pfx_intensity = 0.0, sab_pfx_threshold = 0.5;
 static unsigned char *sab_pfx_a = NULL;        /* graded frame before the bloom, RGB */
+/* duel bullet time (sab_postfx_bullet / sab_postfx_lofi) */
+static int sab_bt_vig = 0, sab_bt_box = 0;
+static double sab_bt_dark = 0, sab_bt_sharp = 0, sab_bt_contrast = 0, sab_bt_red = 1, sab_bt_density = 0,
+              sab_bt_aspect = 16.0 / 9.0, sab_bt_lofi_amount = 0.17;
+static unsigned char *sab_bt_lofi = NULL;      /* 16^3 RGB */
 
 /* Direct-mapped cache of graded colours (pixel art: few colours per frame). */
 #define SAB_PFX_CACHE 65536
@@ -1176,6 +1192,145 @@ HRESULT sab_postfx_zsplit(ScriptVariant **varlist, ScriptVariant **pretvar, int 
     return S_OK;
 }
 
+
+HRESULT sab_postfx_bullet(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    LONG vig = 0, box = 0;
+    DOUBLE d = 0, sh = 0, c = 0, r = 1, den = 0, asp = 16.0 / 9.0;
+
+    sab_arg_long(varlist, 0, paramCount, &vig);
+    sab_arg_double(varlist, 1, paramCount, &d);
+    sab_arg_double(varlist, 2, paramCount, &sh);
+    sab_arg_double(varlist, 3, paramCount, &c);
+    sab_arg_double(varlist, 4, paramCount, &r);
+    sab_arg_double(varlist, 5, paramCount, &den);
+    sab_arg_long(varlist, 6, paramCount, &box);
+    sab_arg_double(varlist, 7, paramCount, &asp);
+    sab_bt_vig = vig ? 1 : 0;
+    sab_bt_dark = d;
+    sab_bt_sharp = sh;
+    sab_bt_contrast = c;
+    sab_bt_red = r;
+    sab_bt_density = den;
+    sab_bt_box = box ? 1 : 0;
+    sab_bt_aspect = asp > 0 ? asp : 16.0 / 9.0;
+    *pretvar = NULL;
+    return S_OK;
+}
+
+HRESULT sab_postfx_lofi(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    const char *lp = sab_arg_str(varlist, 0, paramCount);
+    DOUBLE a = 0.17;
+    size_t len = 0;
+    char *buf;
+
+    sab_arg_double(varlist, 1, paramCount, &a);
+    sab_ret_long(pretvar, 0);
+    if(!lp)
+    {
+        return S_OK;
+    }
+    buf = sab_read_file(lp, &len);
+    if(!buf || len != 16 * 16 * 16 * 3)
+    {
+        printf("sab_postfx_lofi: %s is not a 16^3 RGB table\n", lp);
+        free(buf);
+        return S_OK;
+    }
+    free(sab_bt_lofi);
+    sab_bt_lofi = (unsigned char *)buf;
+    sab_bt_lofi_amount = a;
+    sab_ret_long(pretvar, 1);
+    return S_OK;
+}
+
+static double sab_bt_sat(double v)
+{
+    return v < 0 ? 0 : (v > 1 ? 1 : v);
+}
+
+/* The bullet time chain on the graded RGB frame (vignette, letterbox, photo filter, lo-fi palette). */
+static void sab_bt_apply(unsigned char *a, int W, int H)
+{
+    int x, y, ch, photo = sab_bt_density > 0.01;
+    double Dx = sab_bt_sharp * 0.01, Dy = sab_bt_dark * 0.02, Dz = sab_bt_contrast * 0.01, Dw = 0.0;
+    double k[3], off = 0;
+    int top = 0, bot = H;
+
+    if(!sab_bt_vig && !sab_bt_box && !photo)
+    {
+        return;
+    }
+    k[0] = sab_bt_red;
+    k[1] = 1.0;
+    k[2] = 1.0;
+    if(sab_bt_box)
+    {
+        /* Letterbox: rows outside [off, 1 - off], off = (H - W / aspect) / 2 / H */
+        off = (H - W / sab_bt_aspect) / 2.0 / H;
+        if(off > 0)
+        {
+            top = (int)(off * H + 0.5);
+            bot = H - top;
+        }
+    }
+    for(y = 0; y < H; y++)
+    {
+        double vy = (H - 1 - y + 0.5) / H - 0.5;          /* uv y up */
+        for(x = 0; x < W; x++)
+        {
+            unsigned char *p = a + ((size_t)y * W + x) * 3;
+            double c[3], t, m, d, L, f;
+
+            if(y < top || y >= bot)
+            {
+                p[0] = p[1] = p[2] = 0;
+                continue;
+            }
+            for(ch = 0; ch < 3; ch++)
+            {
+                c[ch] = p[ch] / 255.0;
+            }
+            if(sab_bt_vig)
+            {
+                double vx = (x + 0.5) / W - 0.71;
+                d = sqrt(vx * vx + vy * vy);
+                t = sab_bt_sat((d * (Dx + Dy) - 0.8) / (Dx * 0.799 - 0.8));
+                m = t * t * (3 - 2 * t);
+                for(ch = 0; ch < 3; ch++)
+                {
+                    c[ch] = sab_bt_sat(((c[ch] - k[ch]) * (1 - Dz * (m - 1) - Dw) + k[ch]) * m);
+                }
+            }
+            if(photo)
+            {
+                static const double col[3] = {1.0, 0.5, 0.2};
+                L = c[0] * 0.222 + c[1] * 0.707 + c[2] * 0.071;
+                for(ch = 0; ch < 3; ch++)
+                {
+                    f = col[ch] * sab_bt_sat(2 * L);
+                    f = f + (1 - f) * sab_bt_sat(L - 0.5) * 2;
+                    c[ch] = c[ch] + (f - c[ch]) * sab_bt_sat(L * sab_bt_density);
+                }
+                if(sab_bt_lofi)
+                {
+                    int r = (int)(sab_bt_sat(c[0]) * 15 + 0.5), g = (int)(sab_bt_sat(c[1]) * 15 + 0.5),
+                        b = (int)(sab_bt_sat(c[2]) * 15 + 0.5);
+                    const unsigned char *q = sab_bt_lofi + ((b * 16 + g) * 16 + r) * 3;
+                    for(ch = 0; ch < 3; ch++)
+                    {
+                        c[ch] = c[ch] + sab_bt_lofi_amount * (q[ch] / 255.0 - c[ch]);
+                    }
+                }
+            }
+            for(ch = 0; ch < 3; ch++)
+            {
+                p[ch] = (unsigned char)(sab_bt_sat(c[ch]) * 255 + 0.5);
+            }
+        }
+    }
+}
 
 static void sab_pfx_lookup_slow(const unsigned char *src, unsigned char *dst);
 
@@ -1465,6 +1620,7 @@ void sab_postfx_apply(s_screen *scr)
         free(u1);
         free(u2);
     }
+    sab_bt_apply(sab_pfx_a, W, H);
     for(y = 0; y < H; y++)
     {
         for(x = 0; x < W; x++)
@@ -1503,4 +1659,6 @@ void sab_register_functions(List *list)
     List_InsertAfter(list, (void *)sab_postfx, "sab_postfx");
     List_InsertAfter(list, (void *)sab_postfx_bloom, "sab_postfx_bloom");
     List_InsertAfter(list, (void *)sab_postfx_zsplit, "sab_postfx_zsplit");
+    List_InsertAfter(list, (void *)sab_postfx_bullet, "sab_postfx_bullet");
+    List_InsertAfter(list, (void *)sab_postfx_lofi, "sab_postfx_lofi");
 }
