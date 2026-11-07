@@ -1024,7 +1024,10 @@ HRESULT sab_nav_patch(ScriptVariant **varlist, ScriptVariant **pretvar, int para
     }
     for(i = 0; i < m->npatch; i++)
     {
-        if(!strcmp(m->patch[i].name, name))
+        /* "<name>" and its numbered twins "<name>#<k>" (one owner, several obstacles) */
+        size_t ln = strlen(name);
+        if(!strcmp(m->patch[i].name, name)
+           || (!strncmp(m->patch[i].name, name, ln) && m->patch[i].name[ln] == '#'))
         {
             m->patch[i].on = on ? 1 : 0;
             found = 1;
