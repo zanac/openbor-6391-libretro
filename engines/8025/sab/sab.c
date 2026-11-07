@@ -1009,6 +1009,302 @@ HRESULT sab_nav_raycast(ScriptVariant **varlist, ScriptVariant **pretvar, int pa
     return S_OK;
 }
 
+
+/* the segment a -> b on the walk map at about height y (sab_nav_raycast's test) */
+static int sab_nav_clear(const sab_nav_map *m, double ax, double az, double bx, double bz, float y)
+{
+    double len = sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az)), step = m->cell * 0.5, t;
+    int i, n = (int)floor(len / step) + 1;
+    float f;
+
+    for(i = 1; i <= n && len > 0; i++)
+    {
+        double x, z;
+
+        t = i * step / len;
+        if(t > 1)
+        {
+            t = 1;
+        }
+        x = ax + (bx - ax) * t;
+        z = az + (bz - az) * t;
+        if(!sab_nav_floor_at(m, x, y, z, &f))
+        {
+            f = y;
+        }
+        if(!sab_nav_on(m, x, f, z))
+        {
+            return 0;
+        }
+        y = f;
+    }
+    return 1;
+}
+
+#define SAB_NP_MARGIN 20.0
+
+static int sab_nav_path_search(const sab_nav_map *m, double ax, double az, double bx, double bz, float y,
+                               float *ox, float *oz);
+
+//sab_nav_path(h, ax, az, bx, bz, y, out): Utils.GetFirstPathNode - the first
+//corner of a shortest walkable path from a to b (A* on the map's cells, 8
+//neighbours, within SAB_NP_MARGIN units around both, then the farthest path
+//cell seen straight from a; a point off the map first goes back to its
+//nearest point); out[0..1]; returns 1 when found (b itself when the way is
+//clear), 0 when no path (out = b). The answer is kept while a and b stay in
+//their cells.
+HRESULT sab_nav_path(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    sab_nav_map *m = sab_nav_get(varlist, paramCount);
+    DOUBLE ax, az, bx, bz, y;
+    Varlist *out = sab_arg_array(varlist, 6, paramCount);
+    float cell;
+    int res;
+
+    if(!m || !out || !sab_arg_double(varlist, 1, paramCount, &ax) || !sab_arg_double(varlist, 2, paramCount, &az)
+       || !sab_arg_double(varlist, 3, paramCount, &bx) || !sab_arg_double(varlist, 4, paramCount, &bz)
+       || !sab_arg_double(varlist, 5, paramCount, &y))
+    {
+        printf("Function requires: sab_nav_path(handle, ax, az, bx, bz, y, out_array)\n");
+        *pretvar = NULL;
+        return E_FAIL;
+    }
+    sab_array_set_double(out, 0, bx);
+    sab_array_set_double(out, 1, bz);
+    if(sab_nav_clear(m, ax, az, bx, bz, (float)y))
+    {
+        sab_ret_long(pretvar, 1);
+        return S_OK;
+    }
+    {
+        /* a off the map (pushed there): first back to its nearest point */
+        float f, ox, oy, oz;
+
+        if(!sab_nav_floor_at(m, (float)ax, (float)y, (float)az, &f))
+        {
+            f = (float)y;
+        }
+        if(!sab_nav_on(m, (float)ax, f, (float)az))
+        {
+            if(sab_nav_sample_pt(m, (float)ax, (float)y, (float)az, 3.0f, 0.5f, &ox, &oy, &oz))
+            {
+                sab_array_set_double(out, 0, ox);
+                sab_array_set_double(out, 1, oz);
+                sab_ret_long(pretvar, 1);
+                return S_OK;
+            }
+        }
+    }
+    cell = m->cell;
+    {
+        /* the last answer while a and b stay in their cells */
+        static const sab_nav_map *lm = NULL;
+        static int la = -1, lb = -1, lr = 0;
+        static float lx = 0, lz = 0;
+        int ca = (int)floor(ax / cell) * 65536 + (int)floor(az / cell), cb = (int)floor(bx / cell) * 65536 + (int)floor(bz / cell);
+
+        if(lm == m && la == ca && lb == cb)
+        {
+            sab_array_set_double(out, 0, lx);
+            sab_array_set_double(out, 1, lz);
+            sab_ret_long(pretvar, lr);
+            return S_OK;
+        }
+        lm = m;
+        la = ca;
+        lb = cb;
+        res = sab_nav_path_search(m, ax, az, bx, bz, (float)y, &lx, &lz);
+        lr = res;
+        sab_array_set_double(out, 0, lx);
+        sab_array_set_double(out, 1, lz);
+        sab_ret_long(pretvar, res);
+        return S_OK;
+    }
+}
+
+/* A* of sab_nav_path: 1 and the first corner in (*ox, *oz), or 0 (b) */
+static int sab_nav_path_search(const sab_nav_map *m, double ax, double az, double bx, double bz, float y,
+                               float *ox, float *oz)
+{
+    float cell = m->cell, x0, z0, *g = NULL, *fl = NULL, *hf = NULL;
+    int nx, nz, n, sa, sb, found = 0, *par = NULL, *heap = NULL, hn = 0, hcap, res = 0;
+    unsigned char *st = NULL;
+
+    *ox = (float)bx;
+    *oz = (float)bz;
+    x0 = (float)((ax < bx ? ax : bx) - SAB_NP_MARGIN);
+    z0 = (float)((az < bz ? az : bz) - SAB_NP_MARGIN);
+    nx = (int)(((ax > bx ? ax : bx) + SAB_NP_MARGIN - x0) / cell) + 1;
+    nz = (int)(((az > bz ? az : bz) + SAB_NP_MARGIN - z0) / cell) + 1;
+    if(nx < 2 || nz < 2 || (long)nx * nz > 2000000)
+    {
+        return 0;
+    }
+    n = nx * nz;
+    g = malloc(sizeof(float) * n);
+    fl = malloc(sizeof(float) * n);
+    par = malloc(sizeof(int) * n);
+    hcap = n * 4;
+    heap = malloc(sizeof(int) * hcap);
+    hf = malloc(sizeof(float) * n);
+    st = calloc(n, 1);              /* 0 new, 1 open, 2 closed, 3 blocked */
+    if(!g || !fl || !par || !heap || !hf || !st)
+    {
+        goto done;
+    }
+#define SAB_NP_X(k) (x0 + ((k) % nx + 0.5f) * cell)
+#define SAB_NP_Z(k) (z0 + ((k) / nx + 0.5f) * cell)
+#define SAB_NP_H(k) (sqrtf((SAB_NP_X(k) - (float)bx) * (SAB_NP_X(k) - (float)bx) + (SAB_NP_Z(k) - (float)bz) * (SAB_NP_Z(k) - (float)bz)))
+    sa = (int)((az - z0) / cell) * nx + (int)((ax - x0) / cell);
+    sb = (int)((bz - z0) / cell) * nx + (int)((bx - x0) / cell);
+    g[sa] = 0;
+    fl[sa] = y;
+    par[sa] = -1;
+    st[sa] = 1;
+    hf[sa] = SAB_NP_H(sa);
+    heap[hn++] = sa;
+    while(hn > 0)
+    {
+        int cur, k, dx, dz, cx, cz;
+
+        /* pop the open cell of least g + h (binary heap; stale entries skipped) */
+        cur = heap[0];
+        heap[0] = heap[--hn];
+        for(k = 0;;)
+        {
+            int l = 2 * k + 1, r = l + 1, mn = k, t;
+
+            if(l < hn && hf[heap[l]] < hf[heap[mn]])
+            {
+                mn = l;
+            }
+            if(r < hn && hf[heap[r]] < hf[heap[mn]])
+            {
+                mn = r;
+            }
+            if(mn == k)
+            {
+                break;
+            }
+            t = heap[k];
+            heap[k] = heap[mn];
+            heap[mn] = t;
+            k = mn;
+        }
+        if(st[cur] == 2)
+        {
+            continue;
+        }
+        st[cur] = 2;
+        if(cur == sb)
+        {
+            found = 1;
+            break;
+        }
+        cx = cur % nx;
+        cz = cur / nx;
+        for(dz = -1; dz <= 1; dz++)
+        {
+            for(dx = -1; dx <= 1; dx++)
+            {
+                int nb, ex = cx + dx, ez = cz + dz;
+                float px, pz, f, ng;
+
+                if((!dx && !dz) || ex < 0 || ez < 0 || ex >= nx || ez >= nz)
+                {
+                    continue;
+                }
+                nb = ez * nx + ex;
+                if(st[nb] >= 2)
+                {
+                    continue;
+                }
+                px = SAB_NP_X(nb);
+                pz = SAB_NP_Z(nb);
+                if(!sab_nav_floor_at(m, px, fl[cur], pz, &f))
+                {
+                    f = fl[cur];
+                }
+                if(nb != sb && !sab_nav_on(m, px, f, pz))
+                {
+                    st[nb] = 3;
+                    continue;
+                }
+                ng = g[cur] + cell * ((dx && dz) ? 1.41421356f : 1.0f);
+                if(st[nb] == 1 && ng >= g[nb])
+                {
+                    continue;
+                }
+                g[nb] = ng;
+                fl[nb] = f;
+                par[nb] = cur;
+                st[nb] = 1;
+                hf[nb] = ng + SAB_NP_H(nb);
+                if(hn < hcap)
+                {
+                    /* push (a cell may be in the heap twice: the old entry is
+                       popped later and skipped as closed) */
+                    int c2 = hn++;
+
+                    heap[c2] = nb;
+                    while(c2 > 0 && hf[heap[(c2 - 1) / 2]] > hf[heap[c2]])
+                    {
+                        int t = heap[c2];
+
+                        heap[c2] = heap[(c2 - 1) / 2];
+                        heap[(c2 - 1) / 2] = t;
+                        c2 = (c2 - 1) / 2;
+                    }
+                }
+            }
+        }
+    }
+    if(found)
+    {
+        /* string pulling: the farthest cell of the path seen from a */
+        int k = sb, best = sb;
+
+        while(k >= 0 && k != sa)
+        {
+            if(sab_nav_clear(m, ax, az, SAB_NP_X(k), SAB_NP_Z(k), y))
+            {
+                best = k;
+                break;
+            }
+            k = par[k];
+        }
+        if(best != sb)
+        {
+            *ox = SAB_NP_X(best);
+            *oz = SAB_NP_Z(best);
+        }
+        else if(k != sb)
+        {
+            /* nothing seen straight (a starts at a wall): the first step */
+            int f1 = sb;
+
+            for(k = sb; k >= 0 && par[k] != sa && par[k] >= 0; k = par[k])
+            {
+                f1 = par[k];
+            }
+            *ox = SAB_NP_X(f1);
+            *oz = SAB_NP_Z(f1);
+        }
+        res = 1;
+    }
+#undef SAB_NP_X
+#undef SAB_NP_Z
+#undef SAB_NP_H
+done:
+    free(g);
+    free(fl);
+    free(par);
+    free(heap);
+    free(hf);
+    free(st);
+    return res;
+}
+
 //sab_nav_patch(h, name, on)
 HRESULT sab_nav_patch(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
 {
@@ -2474,6 +2770,7 @@ void sab_register_functions(List *list)
     List_InsertAfter(list, (void *)sab_nav_floor, "sab_nav_floor");
     List_InsertAfter(list, (void *)sab_nav_raycast, "sab_nav_raycast");
     List_InsertAfter(list, (void *)sab_nav_patch, "sab_nav_patch");
+    List_InsertAfter(list, (void *)sab_nav_path, "sab_nav_path");
     List_InsertAfter(list, (void *)sab_camera, "sab_camera");
     List_InsertAfter(list, (void *)sab_postfx_load, "sab_postfx_load");
     List_InsertAfter(list, (void *)sab_postfx, "sab_postfx");

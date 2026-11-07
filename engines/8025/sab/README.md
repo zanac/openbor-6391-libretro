@@ -78,6 +78,7 @@ in `[ylo, yhi]` while it is on. Units are whatever the mod uses.
 | `sab_nav_floor(h, x, y, z)` | floor height under (x, z): the highest at most 1 above `y`; `y` when there is none |
 | `sab_nav_raycast(h, ax, az, bx, bz, y, step, out)` | march from a to b in `step` units; returns 1 when the way is blocked; `out[0..1]` = last walkable point (b when clear) |
 | `sab_nav_patch(h, name, on)` | switch every patch of that name; returns 1 if found |
+| `sab_nav_path(h, ax, az, bx, bz, y, out)` | Unity's `Utils.GetFirstPathNode`: the first corner of a shortest walkable path from a to b (A* on the map's cells within 20 units around both, then the farthest path cell seen straight from a; a point off the map first goes back to its nearest point); `out[0..1]`; 1 when found (b itself when the way is clear), 0 when there is no path (out = b); the answer is kept while a and b stay in their cells |
 
 ### Camera
 
