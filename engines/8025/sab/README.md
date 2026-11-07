@@ -120,7 +120,9 @@ level <x0> <top>                        world x of the level picture's column 0,
 image <n> <file>                        RGBA PNG of the pak
 layer <index> <owner> <pad> "<path>"    owner: the recycler shown with it (-1: always shown)
 recycler <index> <active> <margin> <n> <layer> <v> ... "<path>"
-piece <layer> <image> <col> <row> <depth> <blend> <order> <group> <x> <half width> <on> "<path>"
+piece <layer> <image> <col> <row> <depth> <blend> <order> <group> <x> <half width> <on> [<alpha>] "<path>"
+anim <index> <layer> <frames> <fps> "<root>"
+apiece <anim> <depth> <blend> <order> <group> <on> <image:col:row | -> ... "<path>"
 emitter <owner> <x> <y> <z> <depth> <dx> <dy> <dz> <ux> <uy> <uz> <vx> <vy> <vz> <radius> <rate>
         <life> <speed> <width> <length> <alpha min> <alpha max> "<path>"
 end
@@ -138,7 +140,11 @@ additive, 2 multiply. An emitter (shown with its owner) starts `rate`
 particles per second on the disc of `radius` around (x, y, z) (axes u, v),
 moves them along d at `speed` for `life` seconds and draws each as a white
 horizontal streak `length` long back along d, `width` thick, alpha random in
-[min, max], at its depth.
+[min, max], at its depth. An animated piece (`apiece`) has one image per
+frame of its `anim` (a baked Unity Animation clip; `-` hidden): frame 0 is
+the rest pose, drawn when the piece is on, the others are drawn as the clip
+shows them; it is on the anim's layer. A piece's alpha (default 1) scales
+its image's alpha.
 
 | Function | Description |
 | --- | --- |
@@ -146,4 +152,6 @@ horizontal streak `length` long back along d, `width` thick, alpha random in
 | `sab_scroll_active(path, on)` | switch a recycler (its object's active state); 1 if found |
 | `sab_scroll_show(path, on)` | show / hide every piece at or below that object path; returns the count |
 | `sab_scroll_offset(path, dx, dy)` | draw a layer moved by (dx, dy) world units (a rigid layer no recycler moves, e.g. a shaking vehicle) |
+| `sab_scroll_anim(root, t)` | the clip of an animated root at t seconds (frame 1 + t · fps, the last one held); t < 0: the rest pose (frame 0); 1 if found |
+| `sab_scroll_alpha(path, a)` | the opacity (0…1) of every piece at or below that object path (the image's alpha × a); returns the count |
 | `sab_scroll_frame(dt, camleft)` | once per frame: move and recycle (camleft: world x of the screen's left edge), then queue the shown pieces |

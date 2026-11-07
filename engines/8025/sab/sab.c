@@ -2081,9 +2081,16 @@ typedef struct
 typedef struct
 {
     int layer, img, col, row, depth, blend, group, on, w, h;
-    float x0, hw, dx;
+    float x0, hw, dx, alpha, alpha0;
     char *path;
+    int anim, nfr, *fr;         /* animated piece: anim index, frames (image, col, row; image -1 hidden) */
 } sab_sc_piece;
+
+typedef struct
+{
+    int layer, nfr, fps, frame;
+    char *path;
+} sab_sc_anim;
 
 typedef struct
 {
@@ -2117,7 +2124,8 @@ typedef struct
 static struct
 {
     char path[256];
-    int nimg, nlayer, nrec, npiece, nemit, ok;
+    int nimg, nlayer, nrec, npiece, nemit, nanim, ok;
+    sab_sc_anim *anim;
     float x0, top;              /* "level <x0> <top>": game x of column 0, y + z of row 0 */
     sab_sc_emitter *emit;
     sab_sc_image *img;
@@ -2145,7 +2153,13 @@ static void sab_sc_free(void)
     for(i = 0; i < sab_sc.npiece; i++)
     {
         free(sab_sc.piece[i].path);
+        free(sab_sc.piece[i].fr);
     }
+    for(i = 0; i < sab_sc.nanim; i++)
+    {
+        free(sab_sc.anim[i].path);
+    }
+    free(sab_sc.anim);
     free(sab_sc.img);
     free(sab_sc.layer);
     free(sab_sc.rec);
@@ -2188,6 +2202,10 @@ static void sab_sc_reset(void)
     {
         sab_sc.emit[i].n = 0;
         sab_sc.emit[i].acc = 0;
+    }
+    for(i = 0; i < sab_sc.nanim; i++)
+    {
+        sab_sc.anim[i].frame = 0;
     }
 }
 
@@ -2238,7 +2256,7 @@ static int sab_sc_parse(const char *path)
     }
     for(pass = 0; pass < 2; pass++)
     {
-        int ni = 0, nl = 0, nr = 0, np = 0, ne = 0;
+        int ni = 0, nl = 0, nr = 0, np = 0, ne = 0, na = 0;
         char *copy = strdup(buf);
 
         for(line = copy; line && *line; line = next)
@@ -2342,9 +2360,63 @@ static int sab_sc_parse(const char *path)
                     sab_sc_piece *q = &sab_sc.piece[np];
                     int order;
 
-                    sscanf(line, "piece %d %d %d %d %d %d %d %d %f %f %d", &q->layer, &q->img, &q->col, &q->row,
-                           &q->depth, &q->blend, &order, &q->group, &q->x0, &q->hw, &q->on);
+                    q->alpha = 1;
+                    q->anim = -1;
+                    sscanf(line, "piece %d %d %d %d %d %d %d %d %f %f %d %f", &q->layer, &q->img, &q->col, &q->row,
+                           &q->depth, &q->blend, &order, &q->group, &q->x0, &q->hw, &q->on, &q->alpha);
                     q->path = sab_sc_quoted(line);
+                }
+                np++;
+            }
+            else if(!strcmp(kw, "anim"))
+            {
+                if(pass == 1)
+                {
+                    sab_sc_anim *an = &sab_sc.anim[na];
+
+                    sscanf(line, "anim %*d %d %d %d", &an->layer, &an->nfr, &an->fps);
+                    an->path = sab_sc_quoted(line);
+                }
+                na++;
+            }
+            else if(!strcmp(kw, "apiece"))
+            {
+                if(pass == 1)
+                {
+                    sab_sc_piece *q = &sab_sc.piece[np];
+                    int order, used, k;
+                    char *p = line, tok[64];
+
+                    q->alpha = 1;
+                    sscanf(p, "apiece %d %d %d %d %d %d%n", &q->anim, &q->depth, &q->blend, &order, &q->group, &q->on,
+                           &used);
+                    p += used;
+                    if(q->anim < 0 || q->anim >= na)
+                    {
+                        q->anim = 0;
+                    }
+                    q->nfr = 0;
+                    q->fr = NULL;
+                    q->path = sab_sc_quoted(line);
+                    /* frames up to the quoted path */
+                    for(k = 0; sscanf(p, " %63s%n", tok, &used) == 1 && tok[0] != '"'; k++)
+                    {
+                        int im = -1, c = 0, r = 0;
+
+                        p += used;
+                        if(strcmp(tok, "-"))
+                        {
+                            sscanf(tok, "%d:%d:%d", &im, &c, &r);
+                        }
+                        q->fr = realloc(q->fr, sizeof(int) * 3 * (k + 1));
+                        q->fr[k * 3] = im;
+                        q->fr[k * 3 + 1] = c;
+                        q->fr[k * 3 + 2] = r;
+                        q->nfr = k + 1;
+                    }
+                    q->img = q->nfr ? q->fr[0] : -1;
+                    q->col = q->nfr ? q->fr[1] : 0;
+                    q->row = q->nfr ? q->fr[2] : 0;
                 }
                 np++;
             }
@@ -2358,6 +2430,8 @@ static int sab_sc_parse(const char *path)
             sab_sc.npiece = np;
             sab_sc.nemit = ne;
             sab_sc.emit = calloc(ne ? ne : 1, sizeof(*sab_sc.emit));
+            sab_sc.nanim = na;
+            sab_sc.anim = calloc(na ? na : 1, sizeof(*sab_sc.anim));
             sab_sc.img = calloc(ni ? ni : 1, sizeof(*sab_sc.img));
             sab_sc.layer = calloc(nl ? nl : 1, sizeof(*sab_sc.layer));
             sab_sc.rec = calloc(nr ? nr : 1, sizeof(*sab_sc.rec));
@@ -2373,11 +2447,27 @@ static int sab_sc_parse(const char *path)
             sab_sc_piece *q = &sab_sc.piece[i];
             sab_sc_image *im = (q->img >= 0 && q->img < sab_sc.nimg) ? &sab_sc.img[q->img] : NULL;
 
+            q->alpha0 = q->alpha;
+            if(q->fr)
+            {
+                int k;
+
+                q->layer = sab_sc.anim[q->anim].layer;
+                for(k = 0; k < q->nfr; k++)
+                {
+                    int n = q->fr[k * 3];
+
+                    if(n >= 0 && (n >= sab_sc.nimg || !sab_sc.img[n].px))
+                    {
+                        q->fr[k * 3] = -1;
+                    }
+                }
+            }
             if(q->layer < 0 || q->layer >= sab_sc.nlayer)
             {
                 q->layer = 0;
             }
-            if(!im || !im->px)
+            if(!q->fr && (!im || !im->px))
             {
                 q->on = 0;
                 q->img = -1;
@@ -2398,11 +2488,16 @@ static void sab_sc_blit(s_screen *scr, int x, int y, void *arg)
     sab_sc_image *im;
     int i, j, x0, y0, x1, y1;
 
-    if(!scr || scr->pixelformat != PIXEL_32 || q->img < 0)
+    if(!scr || scr->pixelformat != PIXEL_32 || q->img < 0 || q->img >= sab_sc.nimg)
     {
         return;
     }
     im = &sab_sc.img[q->img];
+    if(!im->px)
+    {
+        fprintf(stderr, "sab_sc_blit: image %d not loaded (%s)\n", q->img, q->path);
+        return;
+    }
     x0 = x < 0 ? 0 : x;
     y0 = y < 0 ? 0 : y;
     x1 = x + im->w > scr->width ? scr->width : x + im->w;
@@ -2416,6 +2511,10 @@ static void sab_sc_blit(s_screen *scr, int x, int y, void *arg)
         {
             unsigned a = s[3];
 
+            if(q->alpha < 1)
+            {
+                a = (unsigned)(a * q->alpha + 0.5f);
+            }
             if(!a)
             {
                 continue;
@@ -2536,6 +2635,7 @@ HRESULT sab_scroll_load(ScriptVariant **varlist, ScriptVariant **pretvar, int pa
         for(i = 0; i < sab_sc.npiece; i++)
         {
             sab_sc.piece[i].dx = 0;
+            sab_sc.piece[i].alpha = sab_sc.piece[i].alpha0;
         }
         sab_ret_long(pretvar, 1);
         return S_OK;
@@ -2620,6 +2720,63 @@ HRESULT sab_scroll_offset(ScriptVariant **varlist, ScriptVariant **pretvar, int 
             sab_sc.layer[i].ox = (float)dx;
             sab_sc.layer[i].oy = (float)dy;
             found = 1;
+        }
+    }
+    sab_ret_long(pretvar, found);
+    return S_OK;
+}
+
+//sab_scroll_anim(root, t): the clip of an animated root at t seconds (frame
+//1 + t x fps, the last one held); t < 0: the rest pose
+HRESULT sab_scroll_anim(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    const char *path = sab_arg_str(varlist, 0, paramCount);
+    DOUBLE t = -1;
+    int i, found = 0;
+
+    sab_arg_double(varlist, 1, paramCount, &t);
+    for(i = 0; path && i < sab_sc.nanim; i++)
+    {
+        sab_sc_anim *an = &sab_sc.anim[i];
+
+        if(!strcmp(an->path, path))
+        {
+            an->frame = t < 0 ? 0 : 1 + (int)floor(t * an->fps + 1e-6);
+            if(an->frame >= an->nfr)
+            {
+                an->frame = an->nfr - 1;
+            }
+            found = 1;
+        }
+    }
+    sab_ret_long(pretvar, found);
+    return S_OK;
+}
+
+//sab_scroll_alpha(path, a): the opacity (0..1) of every piece at or below that
+//object path; returns the count
+HRESULT sab_scroll_alpha(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    const char *path = sab_arg_str(varlist, 0, paramCount);
+    DOUBLE a = 1;
+    int i, found = 0;
+    size_t ln;
+
+    sab_arg_double(varlist, 1, paramCount, &a);
+    if(!path)
+    {
+        sab_ret_long(pretvar, 0);
+        return S_OK;
+    }
+    ln = strlen(path);
+    for(i = 0; i < sab_sc.npiece; i++)
+    {
+        const char *p = sab_sc.piece[i].path;
+
+        if(!strncmp(p, path, ln) && (p[ln] == 0 || p[ln] == '/'))
+        {
+            sab_sc.piece[i].alpha = a < 0 ? 0 : (a > 1 ? 1 : (float)a);
+            found++;
         }
     }
     sab_ret_long(pretvar, found);
@@ -2728,7 +2885,35 @@ HRESULT sab_scroll_frame(ScriptVariant **varlist, ScriptVariant **pretvar, int p
         sab_sc_layer *l = &sab_sc.layer[q->layer];
         int x, y, z, sid;
 
-        if(!q->on || q->img < 0 || (l->owner >= 0 && l->owner < sab_sc.nrec && !sab_sc.rec[l->owner].active))
+        if(q->fr)
+        {
+            /* animated piece: the frame of its clip (0: the rest pose, shown
+               when on; the clip's frames show what the clip shows) */
+            int f = sab_sc.anim[q->anim].frame;
+
+            if(f >= q->nfr)
+            {
+                f = q->nfr - 1;
+            }
+            if(f == 0 && !q->on)
+            {
+                continue;
+            }
+            q->img = q->fr[f * 3];
+            q->col = q->fr[f * 3 + 1];
+            q->row = q->fr[f * 3 + 2];
+            if(q->img < 0)
+            {
+                continue;
+            }
+            q->w = sab_sc.img[q->img].w;
+            q->h = sab_sc.img[q->img].h;
+        }
+        else if(!q->on)
+        {
+            continue;
+        }
+        if(q->img < 0 || q->alpha <= 0 || (l->owner >= 0 && l->owner < sab_sc.nrec && !sab_sc.rec[l->owner].active))
         {
             continue;
         }
@@ -2784,4 +2969,6 @@ void sab_register_functions(List *list)
     List_InsertAfter(list, (void *)sab_scroll_show, "sab_scroll_show");
     List_InsertAfter(list, (void *)sab_scroll_frame, "sab_scroll_frame");
     List_InsertAfter(list, (void *)sab_scroll_offset, "sab_scroll_offset");
+    List_InsertAfter(list, (void *)sab_scroll_anim, "sab_scroll_anim");
+    List_InsertAfter(list, (void *)sab_scroll_alpha, "sab_scroll_alpha");
 }
