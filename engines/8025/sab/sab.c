@@ -1089,6 +1089,9 @@ static int sab_bt_vig = 0, sab_bt_box = 0;
 static double sab_bt_dark = 0, sab_bt_sharp = 0, sab_bt_contrast = 0, sab_bt_red = 1, sab_bt_density = 0,
               sab_bt_aspect = 16.0 / 9.0, sab_bt_lofi_amount = 0.17;
 static unsigned char *sab_bt_lofi = NULL;      /* 16^3 RGB */
+/* SnB/ScreenQuad _FadeOut (the level-complete wipe): F, shader time, noise 512^2 */
+static double sab_sq_fade = 0, sab_sq_time = 0;
+static unsigned char *sab_sq_noise = NULL;
 
 /* Direct-mapped cache of graded colours (pixel art: few colours per frame). */
 #define SAB_PFX_CACHE 65536
@@ -1243,6 +1246,94 @@ HRESULT sab_postfx_lofi(ScriptVariant **varlist, ScriptVariant **pretvar, int pa
     sab_bt_lofi_amount = a;
     sab_ret_long(pretvar, 1);
     return S_OK;
+}
+
+/*
+ * sab_postfx_screenquad(fade, time [, noise_path]): SnB/ScreenQuad's _FadeOut
+ * on the graded frame (docs/level-complete.md 3): per pixel, uv snapped to the
+ * frame grid, n = noise(0.3 v, 0.8 v + 0.05 cos(10 u + 4 t)) (red channel,
+ * bilinear, repeat), u += 3 F (n + 0.2), u > 1 -> black. fade 0 = off.
+ * noise_path: 512 x 512 bytes, top row first (loaded once).
+ */
+HRESULT sab_postfx_screenquad(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    DOUBLE f = 0, t = 0;
+    const char *np = sab_arg_str(varlist, 2, paramCount);
+
+    sab_arg_double(varlist, 0, paramCount, &f);
+    sab_arg_double(varlist, 1, paramCount, &t);
+    sab_sq_fade = f;
+    sab_sq_time = t;
+    if(np && !sab_sq_noise)
+    {
+        size_t len = 0;
+        char *buf = sab_read_file(np, &len);
+        if(buf && len == 512 * 512)
+        {
+            sab_sq_noise = (unsigned char *)buf;
+        }
+        else
+        {
+            printf("sab_postfx_screenquad: %s is not a 512^2 table\n", np);
+            free(buf);
+        }
+    }
+    sab_ret_long(pretvar, sab_sq_noise != NULL);
+    return S_OK;
+}
+
+static double sab_sq_sample(double s, double t)
+{
+    /* Unity uv (v up) on the top-row-first table, bilinear, repeat */
+    double x = s * 512 - 0.5, y = (1 - t) * 512 - 0.5, fx, fy;
+    int x0, y0, x1, y1;
+
+    x0 = (int)floor(x);
+    y0 = (int)floor(y);
+    fx = x - x0;
+    fy = y - y0;
+    x1 = ((x0 + 1) % 512 + 512) % 512;
+    y1 = ((y0 + 1) % 512 + 512) % 512;
+    x0 = (x0 % 512 + 512) % 512;
+    y0 = (y0 % 512 + 512) % 512;
+    return ((sab_sq_noise[y0 * 512 + x0] * (1 - fx) + sab_sq_noise[y0 * 512 + x1] * fx) * (1 - fy)
+            + (sab_sq_noise[y1 * 512 + x0] * (1 - fx) + sab_sq_noise[y1 * 512 + x1] * fx) * fy) / 255.0;
+}
+
+/* on the 32-bit screen (4 bytes per pixel), after the curves: the quad shows the camera's render texture */
+static void sab_sq_apply(unsigned char *a, int W, int H)
+{
+    int x, y, sx;
+    unsigned char *row;
+
+    if(sab_sq_fade <= 0 || !sab_sq_noise)
+    {
+        return;
+    }
+    row = malloc((size_t)W * 4);
+    for(y = 0; y < H; y++)
+    {
+        double v = (H - 1 - y + 0.5) / H;
+        memcpy(row, a + (size_t)y * W * 4, (size_t)W * 4);
+        for(x = 0; x < W; x++)
+        {
+            double u = (x + 0.5) / W, n;
+            unsigned char *d = a + ((size_t)y * W + x) * 4;
+            n = sab_sq_sample(0.3 * v, 0.8 * v + 0.05 * cos(10 * u + 4 * sab_sq_time));
+            u += 3 * sab_sq_fade * (n + 0.2);
+            if(u > 1)
+            {
+                d[0] = d[1] = d[2] = 0;
+                continue;
+            }
+            sx = (int)(u * W);
+            sx = sx < 0 ? 0 : (sx >= W ? W - 1 : sx);
+            d[0] = row[sx * 4];
+            d[1] = row[sx * 4 + 1];
+            d[2] = row[sx * 4 + 2];
+        }
+    }
+    free(row);
 }
 
 static double sab_bt_sat(double v)
@@ -1640,6 +1731,7 @@ void sab_postfx_apply(s_screen *scr)
             }
         }
     }
+    sab_sq_apply(px, W, H);
 }
 
 /* ============================================================ registration */
@@ -1661,4 +1753,5 @@ void sab_register_functions(List *list)
     List_InsertAfter(list, (void *)sab_postfx_zsplit, "sab_postfx_zsplit");
     List_InsertAfter(list, (void *)sab_postfx_bullet, "sab_postfx_bullet");
     List_InsertAfter(list, (void *)sab_postfx_lofi, "sab_postfx_lofi");
+    List_InsertAfter(list, (void *)sab_postfx_screenquad, "sab_postfx_screenquad");
 }
