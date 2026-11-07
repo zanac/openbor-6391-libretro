@@ -100,6 +100,7 @@ other mods are not affected.
 | `sab_postfx(on, curves)` | enable / disable; `curves` 0 skips the tables (e.g. a scene where the game disables its curves) |
 | `sab_postfx_bloom(intensity, threshold)` | Unity Standard Assets `Bloom` (quality High, 2 blur iterations, spread 2.5, Add): 4×4 max to a quarter-size image, [1, 2, 1] tent, `max(c − threshold, 0)`, two cumulative 9-tap blurs combined with max, tent, two bilinear 2× upsamples, `+ intensity ·` the result. Intensity 0 turns it off |
 | `sab_postfx_zsplit(z)` | sprite-queue z where the grading stops (default `HUD_Z`) |
+| `sab_postfx_grayscale(amount)` | Colorful `Grayscale` after the grading and the bloom: `rgb = lerp(rgb, 0.299 r + 0.587 g + 0.114 b, amount)`, below the z split; works with the grading off (the frame is then only greyed); 0 = off |
 
 Cost: about 3.5 ms per 640×360 frame on the build machine (one thread).
 The Slaps And Beans mod uses it for the Western camera chain (its

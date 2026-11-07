@@ -1392,15 +1392,22 @@ static unsigned char *sab_bt_lofi = NULL;      /* 16^3 RGB */
 /* SnB/ScreenQuad _FadeOut (the level-complete wipe): F, shader time, noise 512^2 */
 static double sab_sq_fade = 0, sab_sq_time = 0;
 static unsigned char *sab_sq_noise = NULL;
+/* Colorful Grayscale (the train roof's quicktime): blend amount, 0 off */
+static double sab_gs_amount = 0;
 
 /* Direct-mapped cache of graded colours (pixel art: few colours per frame). */
 #define SAB_PFX_CACHE 65536
 static unsigned int sab_pfx_ckey[SAB_PFX_CACHE];
 static unsigned char sab_pfx_cval[SAB_PFX_CACHE][3];
 
-int sab_postfx_active(void)
+static int sab_postfx_grading(void)
 {
     return sab_pfx_on && sab_pfx_lut;
+}
+
+int sab_postfx_active(void)
+{
+    return sab_postfx_grading() || sab_gs_amount > 0;
 }
 
 int sab_postfx_split(void)
@@ -1519,6 +1526,38 @@ HRESULT sab_postfx_bullet(ScriptVariant **varlist, ScriptVariant **pretvar, int 
     sab_bt_aspect = asp > 0 ? asp : 16.0 / 9.0;
     *pretvar = NULL;
     return S_OK;
+}
+
+/*
+ * sab_postfx_grayscale(amount): Colorful's Grayscale on the camera's image,
+ * after the grading (lum = 0.299 r + 0.587 g + 0.114 b, rgb = lerp(rgb, lum,
+ * amount)); 0 = off. Works without the grading table.
+ */
+HRESULT sab_postfx_grayscale(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    DOUBLE a = 0;
+
+    sab_arg_double(varlist, 0, paramCount, &a);
+    sab_gs_amount = a < 0 ? 0 : (a > 1 ? 1 : a);
+    *pretvar = NULL;
+    return S_OK;
+}
+
+static void sab_gs_apply(unsigned char *a, int W, int H)
+{
+    int i, n = W * H, k = (int)(sab_gs_amount * 256 + 0.5);
+
+    if(k <= 0)
+    {
+        return;
+    }
+    for(i = 0; i < n; i++, a += 3)
+    {
+        int l = (299 * a[0] + 587 * a[1] + 114 * a[2] + 500) / 1000;
+        a[0] = (unsigned char)(a[0] + (((l - a[0]) * k) >> 8));
+        a[1] = (unsigned char)(a[1] + (((l - a[1]) * k) >> 8));
+        a[2] = (unsigned char)(a[2] + (((l - a[2]) * k) >> 8));
+    }
 }
 
 HRESULT sab_postfx_lofi(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
@@ -1934,7 +1973,7 @@ static void sab_pfx_up2(const unsigned char *src, int w, int h, unsigned char *d
  */
 void sab_postfx_apply(s_screen *scr)
 {
-    int W, H, x, y, c, qw, qh;
+    int W, H, x, y, c, qw, qh, grading;
     unsigned char *px, *q = NULL, *t = NULL, *b0 = NULL, *b1 = NULL, *tmp = NULL, *u1 = NULL, *u2 = NULL;
 
     if(!sab_postfx_active() || !scr || scr->pixelformat != PIXEL_32)
@@ -1945,14 +1984,25 @@ void sab_postfx_apply(s_screen *scr)
     H = scr->height;
     sab_pfx_a = realloc(sab_pfx_a, (size_t)W * H * 3);
     px = scr->data;
+    grading = sab_postfx_grading();
     for(y = 0; y < H; y++)
     {
         for(x = 0; x < W; x++)
         {
-            sab_pfx_lookup(px + ((size_t)y * W + x) * 4, sab_pfx_a + ((size_t)y * W + x) * 3);
+            unsigned char *s = px + ((size_t)y * W + x) * 4, *d = sab_pfx_a + ((size_t)y * W + x) * 3;
+            if(grading)
+            {
+                sab_pfx_lookup(s, d);
+            }
+            else
+            {
+                d[0] = s[0];
+                d[1] = s[1];
+                d[2] = s[2];
+            }
         }
     }
-    if(sab_pfx_intensity > 0 && W % 4 == 0 && H % 4 == 0)
+    if(grading && sab_pfx_intensity > 0 && W % 4 == 0 && H % 4 == 0)
     {
         int th = (int)(sab_pfx_threshold * 255 + 0.5);
         qw = W / 4;
@@ -2012,12 +2062,13 @@ void sab_postfx_apply(s_screen *scr)
         free(u2);
     }
     sab_bt_apply(sab_pfx_a, W, H);
+    sab_gs_apply(sab_pfx_a, W, H);
     for(y = 0; y < H; y++)
     {
         for(x = 0; x < W; x++)
         {
             unsigned char *d = px + ((size_t)y * W + x) * 4, *a = sab_pfx_a + ((size_t)y * W + x) * 3;
-            if(sab_pfx_have_curves && sab_pfx_curves_on)
+            if(grading && sab_pfx_have_curves && sab_pfx_curves_on)
             {
                 d[0] = sab_pfx_curves[0][a[0]];
                 d[1] = sab_pfx_curves[1][a[1]];
@@ -2964,6 +3015,7 @@ void sab_register_functions(List *list)
     List_InsertAfter(list, (void *)sab_postfx_bullet, "sab_postfx_bullet");
     List_InsertAfter(list, (void *)sab_postfx_lofi, "sab_postfx_lofi");
     List_InsertAfter(list, (void *)sab_postfx_screenquad, "sab_postfx_screenquad");
+    List_InsertAfter(list, (void *)sab_postfx_grayscale, "sab_postfx_grayscale");
     List_InsertAfter(list, (void *)sab_scroll_load, "sab_scroll_load");
     List_InsertAfter(list, (void *)sab_scroll_active, "sab_scroll_active");
     List_InsertAfter(list, (void *)sab_scroll_show, "sab_scroll_show");
