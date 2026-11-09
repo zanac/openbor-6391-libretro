@@ -1560,6 +1560,134 @@ static void sab_gs_apply(unsigned char *a, int W, int H)
     }
 }
 
+static void sab_lut3(const unsigned char *L, int n, const unsigned char *src, unsigned char *dst);
+
+/* The post LUT (after the bloom and the bullet-time effects) and the static
+   contrast vignette (CC_ContrastVignette enabled in the scene) of a camera
+   chain such as the Train's (docs of the mod: postfx.md). */
+static unsigned char *sab_pp_lut = NULL;
+static int sab_pp_n = 0, sab_pv_on = 0;
+static double sab_pv_c[2], sab_pv_d[4], sab_pv_k[3];
+static unsigned int sab_pp_ckey[SAB_PFX_CACHE];
+static unsigned char sab_pp_cval[SAB_PFX_CACHE][3];
+
+//sab_postfx_post(path): an N^3 RGB table applied after the bloom ("" none)
+HRESULT sab_postfx_post(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    const char *lp = sab_arg_str(varlist, 0, paramCount);
+    size_t len = 0;
+    char *buf;
+    int n;
+
+    sab_ret_long(pretvar, 0);
+    free(sab_pp_lut);
+    sab_pp_lut = NULL;
+    sab_pp_n = 0;
+    if(!lp || !lp[0])
+    {
+        return S_OK;
+    }
+    buf = sab_read_file(lp, &len);
+    if(!buf)
+    {
+        printf("sab_postfx_post: cannot open %s\n", lp);
+        return S_OK;
+    }
+    for(n = 2; n <= 256 && (size_t)n * n * n * 3 < len; n++)
+    {
+    }
+    if((size_t)n * n * n * 3 != len)
+    {
+        printf("sab_postfx_post: %s is not an N^3 RGB table (%d bytes)\n", lp, (int)len);
+        free(buf);
+        return S_OK;
+    }
+    sab_pp_lut = (unsigned char *)buf;
+    sab_pp_n = n;
+    memset(sab_pp_ckey, 0, sizeof(sab_pp_ckey));
+    sab_ret_long(pretvar, 1);
+    return S_OK;
+}
+
+//sab_postfx_vignette(on, cx, cy, sharpness, darkness, contrast, kr, kg, kb, edge): a static
+//CC_ContrastVignette after the post LUT
+HRESULT sab_postfx_vignette(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    LONG on = 0;
+    DOUBLE v[9] = {0.5, 0.5, 0, 0, 0, 1, 1, 1, 0};
+    int i;
+
+    sab_arg_long(varlist, 0, paramCount, &on);
+    for(i = 0; i < 9; i++)
+    {
+        sab_arg_double(varlist, i + 1, paramCount, &v[i]);
+    }
+    sab_pv_on = on != 0;
+    sab_pv_c[0] = v[0];
+    sab_pv_c[1] = v[1];
+    sab_pv_d[0] = v[2] * 0.01;
+    sab_pv_d[1] = v[3] * 0.02;
+    sab_pv_d[2] = v[4] * 0.01;
+    sab_pv_d[3] = v[8] * 0.01;
+    sab_pv_k[0] = v[5];
+    sab_pv_k[1] = v[6];
+    sab_pv_k[2] = v[7];
+    *pretvar = NULL;
+    return S_OK;
+}
+
+static void sab_pp_apply(unsigned char *a, int W, int H)
+{
+    int x, y, ch;
+
+    if(sab_pp_lut)
+    {
+        for(y = 0; y < W * H; y++)
+        {
+            unsigned char *p = a + (size_t)y * 3;
+            unsigned int key = p[0] | (p[1] << 8) | (p[2] << 16) | 0x1000000u;
+            unsigned int h = (key * 2654435761u) >> 16;
+
+            if(sab_pp_ckey[h] != key)
+            {
+                sab_lut3(sab_pp_lut, sab_pp_n, p, sab_pp_cval[h]);
+                sab_pp_ckey[h] = key;
+            }
+            p[0] = sab_pp_cval[h][0];
+            p[1] = sab_pp_cval[h][1];
+            p[2] = sab_pp_cval[h][2];
+        }
+    }
+    if(!sab_pv_on)
+    {
+        return;
+    }
+    /* Hidden/CC_ContrastVignette: d = |uv - center| (uv y up),
+       t = sat((d (Dx + Dy) - 0.8) / (Dx 0.799 - 0.8)), m = t^2 (3 - 2t),
+       out = ((c - k) (1 - Dz (m - 1) - Dw) + k) m; the factor per row and
+       column is cached in m per pixel */
+    for(y = 0; y < H; y++)
+    {
+        double vy = (H - 1 - y + 0.5) / H - sab_pv_c[1];
+        for(x = 0; x < W; x++)
+        {
+            unsigned char *p = a + ((size_t)y * W + x) * 3;
+            double vx = (x + 0.5) / W - sab_pv_c[0], d = sqrt(vx * vx + vy * vy), t, m, f;
+
+            t = (d * (sab_pv_d[0] + sab_pv_d[1]) - 0.8) / (sab_pv_d[0] * 0.799 - 0.8);
+            t = t < 0 ? 0 : (t > 1 ? 1 : t);
+            m = t * t * (3 - 2 * t);
+            f = 1 - sab_pv_d[2] * (m - 1) - sab_pv_d[3];
+            for(ch = 0; ch < 3; ch++)
+            {
+                double c = ((p[ch] / 255.0 - sab_pv_k[ch]) * f + sab_pv_k[ch]) * m;
+                int i = (int)(c * 255.0 + 0.5);
+                p[ch] = (unsigned char)(i < 0 ? 0 : (i > 255 ? 255 : i));
+            }
+        }
+    }
+}
+
 HRESULT sab_postfx_lofi(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
 {
     const char *lp = sab_arg_str(varlist, 0, paramCount);
@@ -1786,12 +1914,16 @@ static void sab_pfx_lookup(const unsigned char *src, unsigned char *dst)
 /* Trilinear lookup of one 8-bit colour in the N^3 table. */
 static void sab_pfx_lookup_slow(const unsigned char *src, unsigned char *dst)
 {
-    int n = sab_pfx_n, ch, i;
+    sab_lut3(sab_pfx_lut, sab_pfx_n, src, dst);
+}
+
+static void sab_lut3(const unsigned char *L, int n, const unsigned char *src, unsigned char *dst)
+{
+    int ch, i;
     int fr = src[0] * (n - 1), fg = src[1] * (n - 1), fb = src[2] * (n - 1);
     int r0 = fr / 255, g0 = fg / 255, b0 = fb / 255;
     int r1 = r0 < n - 1 ? r0 + 1 : r0, g1 = g0 < n - 1 ? g0 + 1 : g0, b1 = b0 < n - 1 ? b0 + 1 : b0;
     int wr = (fr - r0 * 255) * 256 / 255, wg = (fg - g0 * 255) * 256 / 255, wb = (fb - b0 * 255) * 256 / 255;
-    const unsigned char *L = sab_pfx_lut;
     int o[8];
 
     o[0] = ((b0 * n + g0) * n + r0) * 3;
@@ -2062,6 +2194,10 @@ void sab_postfx_apply(s_screen *scr)
         free(u2);
     }
     sab_bt_apply(sab_pfx_a, W, H);
+    if(grading)
+    {
+        sab_pp_apply(sab_pfx_a, W, H);
+    }
     sab_gs_apply(sab_pfx_a, W, H);
     for(y = 0; y < H; y++)
     {
@@ -3111,4 +3247,6 @@ void sab_register_functions(List *list)
     List_InsertAfter(list, (void *)sab_scroll_anim, "sab_scroll_anim");
     List_InsertAfter(list, (void *)sab_scroll_alpha, "sab_scroll_alpha");
     List_InsertAfter(list, (void *)sab_scroll_uv, "sab_scroll_uv");
+    List_InsertAfter(list, (void *)sab_postfx_post, "sab_postfx_post");
+    List_InsertAfter(list, (void *)sab_postfx_vignette, "sab_postfx_vignette");
 }
