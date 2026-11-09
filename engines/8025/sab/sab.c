@@ -2099,6 +2099,10 @@ void sab_postfx_apply(s_screen *scr)
  *   layer <index> <owner> <pad> "<path>"
  *   recycler <index> <active> <margin> <n> <layer> <v> ... "<path>"
  *   piece <layer> <image> <col> <row> <depth> <blend> <order> <group> <x> <half width> <on> "<path>"
+ *   uv <px per second> "<path>"   the pieces at or below the path (listed
+ *                            before) scroll their image left at that speed,
+ *                            wrapping (a material whose texture offset moves
+ *                            with _Time: the Train's SnB/Scroller windows)
  *   emitter <owner> <x> <y> <z> <depth> <dx> <dy> <dz> <ux> <uy> <uz> <vx> <vy> <vz> <radius> <rate>
  *           <life> <speed> <width> <length> <alpha min> <alpha max> "<path>"
  *   end
@@ -2135,6 +2139,8 @@ typedef struct
     float x0, hw, dx, alpha, alpha0;
     char *path;
     int anim, nfr, *fr;         /* animated piece: anim index, frames (image, col, row; image -1 hidden) */
+    int u;                      /* texture offset in px, wrapped (a scrolling material) */
+    float uspeed, uacc;         /* "uv" line: px per second, accumulated */
 } sab_sc_piece;
 
 typedef struct
@@ -2419,6 +2425,28 @@ static int sab_sc_parse(const char *path)
                 }
                 np++;
             }
+            else if(!strcmp(kw, "uv"))
+            {
+                float sp = 0;
+
+                if(pass == 1 && sscanf(line, "uv %f", &sp) == 1)
+                {
+                    char *path = sab_sc_quoted(line);
+                    size_t ln = strlen(path);
+                    int k;
+
+                    for(k = 0; k < np; k++)
+                    {
+                        const char *pp = sab_sc.piece[k].path;
+
+                        if(pp && !strncmp(pp, path, ln) && (pp[ln] == 0 || pp[ln] == '/'))
+                        {
+                            sab_sc.piece[k].uspeed = sp;
+                        }
+                    }
+                    free(path);
+                }
+            }
             else if(!strcmp(kw, "anim"))
             {
                 if(pass == 1)
@@ -2555,11 +2583,22 @@ static void sab_sc_blit(s_screen *scr, int x, int y, void *arg)
     y1 = y + im->h > scr->height ? scr->height : y + im->h;
     for(j = y0; j < y1; j++)
     {
-        const unsigned char *s = im->px + ((size_t)(j - y) * im->w + (x0 - x)) * 4;
+        const unsigned char *row = im->px + (size_t)(j - y) * im->w * 4;
+        const unsigned char *s = row + (size_t)(x0 - x) * 4;
         unsigned char *d = (unsigned char *)scr->data + ((size_t)j * scr->width + x0) * 4;
+        int sx = ((x0 - x + q->u) % im->w + im->w) % im->w;
 
         for(i = x0; i < x1; i++, s += 4, d += 4)
         {
+            if(q->u)
+            {
+                /* the texture wraps (a UV-scrolled material) */
+                s = row + (size_t)sx * 4;
+                if(++sx == im->w)
+                {
+                    sx = 0;
+                }
+            }
             unsigned a = s[3];
 
             if(q->alpha < 1)
@@ -2834,6 +2873,37 @@ HRESULT sab_scroll_alpha(ScriptVariant **varlist, ScriptVariant **pretvar, int p
     return S_OK;
 }
 
+//sab_scroll_uv(path, px): the pieces of that path (or below it) drawn with
+//their image shifted left by px, wrapping (a material whose texture offset
+//scrolls, e.g. the Train's SnB/Scroller window quads); returns the count
+HRESULT sab_scroll_uv(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
+{
+    const char *path = sab_arg_str(varlist, 0, paramCount);
+    LONG u = 0;
+    int i, found = 0;
+    size_t ln;
+
+    sab_arg_long(varlist, 1, paramCount, &u);
+    if(!path)
+    {
+        sab_ret_long(pretvar, 0);
+        return S_OK;
+    }
+    ln = strlen(path);
+    for(i = 0; i < sab_sc.npiece; i++)
+    {
+        const char *p = sab_sc.piece[i].path;
+
+        if(!strncmp(p, path, ln) && (p[ln] == 0 || p[ln] == '/'))
+        {
+            sab_sc.piece[i].u = (int)u;
+            found++;
+        }
+    }
+    sab_ret_long(pretvar, found);
+    return S_OK;
+}
+
 //sab_scroll_frame(dt, camleft): moves and recycles the active recyclers'
 //layers (camleft: world x of the screen's left edge), then queues the shown
 //pieces; once per frame
@@ -2882,6 +2952,23 @@ HRESULT sab_scroll_frame(ScriptVariant **varlist, ScriptVariant **pretvar, int p
                     q->dx += SAB_SC_CAMW + r->margin * 2 + q->hw + l->pad;
                 }
             }
+        }
+    }
+    /* the scrolling materials (uv lines) */
+    for(j = 0; j < sab_sc.npiece; j++)
+    {
+        sab_sc_piece *q = &sab_sc.piece[j];
+
+        if(q->uspeed != 0 && q->img >= 0 && q->img < sab_sc.nimg && sab_sc.img[q->img].w > 0)
+        {
+            float w = (float)sab_sc.img[q->img].w;
+
+            q->uacc = fmodf(q->uacc + (float)dt * q->uspeed, w);
+            if(q->uacc < 0)
+            {
+                q->uacc += w;
+            }
+            q->u = (int)q->uacc;
         }
     }
     /* the emitters of the active recyclers: emission, motion, death */
@@ -3023,4 +3110,5 @@ void sab_register_functions(List *list)
     List_InsertAfter(list, (void *)sab_scroll_offset, "sab_scroll_offset");
     List_InsertAfter(list, (void *)sab_scroll_anim, "sab_scroll_anim");
     List_InsertAfter(list, (void *)sab_scroll_alpha, "sab_scroll_alpha");
+    List_InsertAfter(list, (void *)sab_scroll_uv, "sab_scroll_uv");
 }

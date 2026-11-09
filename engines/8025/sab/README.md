@@ -122,6 +122,7 @@ image <n> <file>                        RGBA PNG of the pak
 layer <index> <owner> <pad> "<path>"    owner: the recycler shown with it (-1: always shown)
 recycler <index> <active> <margin> <n> <layer> <v> ... "<path>"
 piece <layer> <image> <col> <row> <depth> <blend> <order> <group> <x> <half width> <on> [<alpha>] "<path>"
+uv <px per second> "<path>"
 anim <index> <layer> <frames> <fps> "<root>"
 apiece <anim> <depth> <blend> <order> <group> <on> <image:col:row | -> ... "<path>"
 emitter <owner> <x> <y> <z> <depth> <dx> <dy> <dz> <ux> <uy> <uz> <vx> <vy> <vz> <radius> <rate>
@@ -145,7 +146,10 @@ horizontal streak `length` long back along d, `width` thick, alpha random in
 frame of its `anim` (a baked Unity Animation clip; `-` hidden): frame 0 is
 the rest pose, drawn when the piece is on, the others are drawn as the clip
 shows them; it is on the anim's layer. A piece's alpha (default 1) scales
-its image's alpha.
+its image's alpha. A `uv <px per second> "<path>"` line (after the pieces)
+makes the pieces at or below the path scroll their image left at that
+speed, wrapping: a material whose texture offset moves with time (Unity
+`_Time`, the game seconds of `sab_scroll_frame`).
 
 | Function | Description |
 | --- | --- |
@@ -155,4 +159,5 @@ its image's alpha.
 | `sab_scroll_offset(path, dx, dy)` | draw a layer moved by (dx, dy) world units (a rigid layer no recycler moves, e.g. a shaking vehicle) |
 | `sab_scroll_anim(root, t)` | the clip of an animated root at t seconds (frame 1 + t · fps, the last one held); t < 0: the rest pose (frame 0); 1 if found |
 | `sab_scroll_alpha(path, a)` | the opacity (0…1) of every piece at or below that object path (the image's alpha × a); returns the count |
+| `sab_scroll_uv(path, px)` | the image of every piece at or below that path drawn shifted left by px, wrapping (set by hand; a `uv` line moves it by itself); returns the count |
 | `sab_scroll_frame(dt, camleft)` | once per frame: move and recycle (camleft: world x of the screen's left edge), then queue the shown pieces |
