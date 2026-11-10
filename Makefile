@@ -82,7 +82,8 @@ ifeq ($(SYSTEM_VORBIS), 1)
    LIBS += -lvorbisfile -lvorbis -logg
 endif
 
-DEFINES += -D__LIBRETRO__ -DPNG_NO_CONFIG_H
+# the bundled libpng is built without its SIMD files (NEON is on by default on ARM)
+DEFINES += -D__LIBRETRO__ -DPNG_NO_CONFIG_H -DPNG_ARM_NEON_OPT=0 -DPNG_MIPS_MSA_OPT=0 -DPNG_POWERPC_VSX_OPT=0
 
 ifeq ($(DEBUG), 1)
    CFLAGS += -O0 -g -DDEBUG
