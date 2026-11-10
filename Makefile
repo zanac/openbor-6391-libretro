@@ -149,7 +149,8 @@ ifeq ($(platform), win)
    STANDALONE   := $(TARGET_NAME).exe
    # one .exe: SDL2 and the C runtime linked in; a console program (the
    # command line options and the messages)
-   SDL_LIBS      = $(shell $(SDL2_CONFIG) --static-libs) -static -mconsole
+   # (clock_gettime: winpthreads)
+   SDL_LIBS      = $(shell $(SDL2_CONFIG) --static-libs) -static -mconsole -lpthread
 else
    STANDALONE   := $(TARGET_NAME)
    SDL_LIBS      = $(shell $(SDL2_CONFIG) --libs)
