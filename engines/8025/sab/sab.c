@@ -39,10 +39,10 @@
  *                                     per-channel table (3 x 256 bytes, R G B)
  *                                     applied after it ("" = none); 1/0
  *     sab_postfx(on, curves)          enable; curves 0 skips the table
- *     sab_postfx_bloom(intensity, threshold)
+ *     sab_postfx_bloom(intensity, threshold[, spread])
  *                                     Unity Standard Assets Bloom (High,
- *                                     2 blur iterations, spread 2.5, Add);
- *                                     intensity 0 = off
+ *                                     2 blur iterations, spread 2.5 by
+ *                                     default, Add); intensity 0 = off
  *     sab_postfx_zsplit(z)            sprite-queue z where the grading stops
  *                                     (default HUD_Z)
  *     sab_postfx_bullet(vig, darkness, sharpness, contrast, red, density, box, aspect)
@@ -1382,7 +1382,7 @@ static int sab_pfx_on = 0, sab_pfx_curves_on = 0, sab_pfx_n = 0, sab_pfx_have_cu
 static int sab_pfx_zsplit = 0, sab_pfx_zsplit_set = 0;
 static unsigned char *sab_pfx_lut = NULL;
 static unsigned char sab_pfx_curves[3][256];
-static double sab_pfx_intensity = 0.0, sab_pfx_threshold = 0.5;
+static double sab_pfx_intensity = 0.0, sab_pfx_threshold = 0.5, sab_pfx_spread = 2.5;
 static unsigned char *sab_pfx_a = NULL;        /* graded frame before the bloom, RGB */
 /* duel bullet time (sab_postfx_bullet / sab_postfx_lofi) */
 static int sab_bt_vig = 0, sab_bt_box = 0;
@@ -1479,12 +1479,17 @@ HRESULT sab_postfx(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCo
 
 HRESULT sab_postfx_bloom(ScriptVariant **varlist, ScriptVariant **pretvar, int paramCount)
 {
-    DOUBLE i = 0, t = 0.5;
+    DOUBLE i = 0, t = 0.5, s = 2.5;
 
     sab_arg_double(varlist, 0, paramCount, &i);
     sab_arg_double(varlist, 1, paramCount, &t);
+    if(paramCount > 2)
+    {
+        sab_arg_double(varlist, 2, paramCount, &s);
+    }
     sab_pfx_intensity = i;
     sab_pfx_threshold = t;
+    sab_pfx_spread = s;
     *pretvar = NULL;
     return S_OK;
 }
@@ -2169,8 +2174,9 @@ void sab_postfx_apply(s_screen *scr)
         {
             q[x] = (unsigned char)(q[x] > th ? q[x] - th : 0);
         }
-        sab_pfx_blur(q, b0, qw, qh, 2.5 * qh / 512.0, tmp);
-        sab_pfx_blur(b0, b1, qw, qh, 3.125 * qh / 512.0, tmp);
+        /* BloomOptimized-style iterations: spread, then spread x 1.25 */
+        sab_pfx_blur(q, b0, qw, qh, sab_pfx_spread * qh / 512.0, tmp);
+        sab_pfx_blur(b0, b1, qw, qh, sab_pfx_spread * 1.25 * qh / 512.0, tmp);
         for(x = 0; x < qw * qh * 3; x++)
         {
             q[x] = b0[x] > b1[x] ? b0[x] : b1[x];
