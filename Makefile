@@ -57,7 +57,9 @@ else ifeq ($(platform), osx)
 else ifeq ($(platform), win)
    TARGET  := $(TARGET_NAME)_libretro.dll
    SHARED  := -shared -static-libgcc -Wl,--version-script=$(CORE_DIR)/link.T -Wl,--no-undefined
-   DEFINES += -DWIN
+   # Windows 7 and newer (libvpx's threads need Vista; older MinGW
+   # toolchains default to XP)
+   DEFINES += -DWIN -D_WIN32_WINNT=0x0601
    LIBS    += -lpsapi
 else
    $(error Unsupported platform '$(platform)')
