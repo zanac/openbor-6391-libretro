@@ -176,6 +176,47 @@ one subdirectory per engine.
 `./build.sh` wraps the same commands (`./build.sh win` for a MinGW cross build,
 `./build.sh test some.pak` for a build plus a headless smoke test).
 
+### Standalone program
+
+The same engines also build as a program that needs no libretro frontend:
+`standalone/main.c` is a small SDL2 host (window, audio, keyboard, game
+controllers, rumble) linked with the core's objects. It answers the core's
+environment calls itself, so a game runs exactly as in the core.
+
+```sh
+make standalone                       # -> openbor        (sdl2-config on the PATH)
+./build.sh standalone                 # the same
+./build.sh win-standalone             # -> openbor.exe    (MinGW cross build; SDL2's
+                                      #    MinGW package downloaded, linked statically)
+```
+
+```
+openbor [options] <game.pak>
+  --engine <name>   auto (default) or a version of --list-engines
+  --list-engines    print the engine versions built in
+  --fullscreen      start in fullscreen (F11 / Alt+Enter toggle)
+  --scale <n>       window size: n x the game's resolution (default 2)
+  --gamma <n>       OpenBOR gamma, -255 ... 255 (default 0)
+  --no-analog       the left stick does not move like the D-pad
+  --no-rumble       no controller rumble
+  --save-dir <dir>  where OpenBOR/ is written (default: next to the program)
+```
+
+`--engine auto` chooses the engine as the core does (file-name tag, then
+detection). Keys of player 1: arrows, Z = B, X = A, A = Y, S = X, Q = L,
+W = R, Enter = Start, Right Shift = Select, Esc quits; game controllers are
+players 1-4 (SDL GameController mapping). The Linux program uses the
+system's SDL2 (`libsdl2-2.0-0`); the Windows one is a single `.exe`.
+
+### Release
+
+`.github/workflows/release.yml`, started by hand (Actions → Release → Run
+workflow, on the chosen branch, with an optional version name: empty means
+`<date>-<commit>`), builds the core for Linux x86_64 and aarch64 (ARM
+runner), the standalone `openbor.exe` for Windows and `openbor` for Linux
+x86_64, and publishes them as a GitHub release; every zip holds the README,
+the licence and `build.sh`.
+
 Build numbers are upstream commit counts (`git rev-list --count`), which is
 how each engine's commit was identified. Note that the upstream tag `v4153`
 is misnamed: it points to build 4504.

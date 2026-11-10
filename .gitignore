@@ -6,3 +6,6 @@
 test/frontend
 obj/
 __pycache__/
+/openbor
+/openbor.exe
+deps/sdl2-mingw/

@@ -1,0 +1,98 @@
+# Release: run by hand (Actions → Release → Run workflow) on the chosen branch.
+#
+# Builds, each in its own zip with the README, the licence and the portable
+# build script (build.sh):
+#   openbor_libretro-linux-x86_64.zip   the libretro core (+ .info)
+#   openbor_libretro-linux-aarch64.zip  the libretro core (+ .info), built on an ARM runner
+#   openbor-standalone-windows-x86_64.zip   openbor.exe (SDL2 linked in: one file)
+#   openbor-standalone-linux-x86_64.zip     openbor (needs the system's SDL2)
+# and publishes them as a GitHub release named after the "version" input
+# (empty: <date>-<commit>).
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release name and tag (empty: date-commit, e.g. 2026.11.10-926c33a)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev
+      - name: Core
+        run: ./build.sh
+      - name: Standalone
+        if: matrix.arch == 'x86_64'
+        run: ./build.sh standalone
+      - name: Package
+        run: |
+          mkdir -p dist/core
+          cp openbor_libretro.so openbor_libretro.info README.md LICENSE build.sh dist/core/
+          (cd dist/core && zip -9 ../openbor_libretro-linux-${{ matrix.arch }}.zip *)
+          if [ -f openbor ]; then
+            mkdir -p dist/standalone
+            cp openbor README.md LICENSE build.sh dist/standalone/
+            (cd dist/standalone && zip -9 ../openbor-standalone-linux-${{ matrix.arch }}.zip *)
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*.zip
+
+  windows:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+      - name: Standalone (openbor.exe)
+        run: ./build.sh win-standalone
+      - name: Package
+        run: |
+          mkdir -p dist/standalone
+          cp openbor.exe README.md LICENSE build.sh dist/standalone/
+          (cd dist/standalone && zip -9 ../openbor-standalone-windows-x86_64.zip *)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/*.zip
+
+  release:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ -z "$VERSION" ]; then
+            VERSION="$(date -u +%Y.%m.%d)-$(echo "$GITHUB_SHA" | cut -c1-7)"
+          fi
+          gh release create "$VERSION" dist/*.zip \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$VERSION" \
+            --notes "OpenBOR multi-engine: libretro core (Linux x86_64, aarch64) and standalone program (Windows x86_64, Linux x86_64). Branch ${GITHUB_REF_NAME}, commit ${GITHUB_SHA}."

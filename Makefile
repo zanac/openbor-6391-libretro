@@ -6,6 +6,11 @@
 #   make DEBUG=1               unoptimised build with symbols
 #   make SYSTEM_ZLIB=1 SYSTEM_LIBPNG=1 SYSTEM_VORBIS=1
 #                              link against system libraries instead of deps/
+#   make standalone            the same engines as a program with an SDL2
+#                              host (no frontend needed): openbor / openbor.exe,
+#                              engine chosen with --engine (standalone/main.c);
+#                              SDL2_CONFIG=<path to sdl2-config> for another SDL2
+#                              (Windows: linked statically, one .exe)
 
 CORE_DIR := .
 .DEFAULT_GOAL := all
@@ -136,7 +141,31 @@ $(OBJDIR)/%.o: %.c
 
 -include $(OBJECTS:.o=.d) $(foreach e,$(ENGINES),$(ENGINE_$(e)_OBJECTS:.o=.d))
 
-clean:
-	rm -rf $(OBJDIR) $(TARGET)
+# ---------------------------------------------------------------------------
+# Standalone program: the core's objects + the SDL2 host (standalone/main.c)
+# ---------------------------------------------------------------------------
+SDL2_CONFIG ?= sdl2-config
+ifeq ($(platform), win)
+   STANDALONE   := $(TARGET_NAME).exe
+   # one .exe: SDL2 and the C runtime linked in; a console program (the
+   # command line options and the messages)
+   SDL_LIBS      = $(shell $(SDL2_CONFIG) --static-libs) -static -mconsole
+else
+   STANDALONE   := $(TARGET_NAME)
+   SDL_LIBS      = $(shell $(SDL2_CONFIG) --libs)
+endif
+SDL_CFLAGS = $(shell $(SDL2_CONFIG) --cflags)
 
-.PHONY: all clean
+$(OBJDIR)/standalone/main.o: standalone/main.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(SDL_CFLAGS) -c -o $@ $<
+
+standalone: $(STANDALONE)
+
+$(STANDALONE): $(OBJECTS) $(ENGINE_OBJECTS) $(OBJDIR)/standalone/main.o
+	$(CC) $(LDFLAGS) -o $@ $(OBJDIR)/standalone/main.o $(OBJECTS) $(ENGINE_OBJECTS) $(SDL_LIBS) $(LIBS)
+
+clean:
+	rm -rf $(OBJDIR) $(TARGET) $(STANDALONE)
+
+.PHONY: all clean standalone
