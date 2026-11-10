@@ -1,8 +1,16 @@
-# OpenBOR multi-engine libretro core
+# OpenBOR multi-engine (libretro core and standalone program)
 
-A [libretro](https://www.libretro.com/) core of the **OpenBOR** beat 'em up
-engine that contains **several official OpenBOR releases** and picks the
-right one for each game:
+The **OpenBOR** beat 'em up engine with **several official OpenBOR releases**
+built in, picking the right one for each game. It comes in two forms built
+from the same code:
+
+* a [libretro](https://www.libretro.com/) **core** (`openbor_libretro.so` /
+  `.dll` / `.dylib`) for RetroArch and other libretro frontends;
+* a **standalone program** (`openbor`, `openbor.exe`) that needs no frontend:
+  a small SDL2 host around the same core, with the engine chosen on the
+  command line.
+
+The engines:
 
 | Engine | Upstream source | Typical mods |
 |---|---|---|
@@ -29,9 +37,22 @@ commands, script functions and constants that older engines reject, and older
 mods can behave differently on newer engines. That is why players keep
 several OpenBOR executables around; this core does the choosing for them.
 
-## Usage
+## Downloads
 
-Load a mod's `.pak` file as content.
+Releases (GitHub *Releases* page of this repository) hold one zip per build,
+each with this README, the licence and the portable build script:
+
+| File | Contents |
+|---|---|
+| `openbor_libretro-linux-x86_64.zip` | the core for Linux x86_64 (+ `openbor_libretro.info`) |
+| `openbor_libretro-linux-aarch64.zip` | the core for Linux aarch64 (ARM 64-bit boards and handhelds) |
+| `openbor-standalone-windows-x86_64.zip` | `openbor.exe`: one file, SDL2 built in |
+| `openbor-standalone-linux-x86_64.zip` | `openbor`: needs the system's SDL2 (`libsdl2-2.0-0`) |
+
+## Usage as a libretro core
+
+Copy `openbor_libretro.so` (and `openbor_libretro.info` into the frontend's
+info folder) and load a mod's `.pak` file as content.
 
 ### How the engine is chosen
 
@@ -73,7 +94,8 @@ The frontend log shows the decision, e.g.
 ### Data files
 
 Each engine keeps its writable data under the frontend's **save directory**
-(falling back to the system directory, then to the content directory), in a
+(falling back to the system directory, then to the content directory; the
+standalone program: next to the executable, or `--save-dir`), in a
 folder per engine version because settings, high scores and saved games are
 raw structures whose layout changes between versions (`8025` and `8025_webm`
 share the `8025` folder):
@@ -126,11 +148,65 @@ builds 3711–6391 (*Sound Options → Advanced Options*; the output is always
 44.1 kHz / 16-bit and the frontend resamples it). Window size, filters,
 scaling and frame rate limits are the frontend's.
 
-### Streets of Rage X
+## Usage as a standalone program
+
+```
+openbor [options] <game.pak>
+  --engine <name>   auto (default) or a version of --list-engines
+  --list-engines    print the engine versions built in
+  --fullscreen      start in fullscreen (F11 / Alt+Enter toggle)
+  --scale <n>       window size: n x the game's resolution (default 2)
+  --gamma <n>       OpenBOR gamma, -255 ... 255 (default 0)
+  --no-analog       the left stick does not move like the D-pad
+  --no-rumble       no controller rumble
+  --save-dir <dir>  where OpenBOR/ is written (default: next to the program)
+```
+
+Examples:
+
+```sh
+openbor "Paks/SORX [ob8025_webm].pak"          # engine from the file-name tag
+openbor --engine 6391 --fullscreen MyMod.pak   # force build 6391
+openbor.exe --list-engines
+```
+
+`--engine` is the core's *Engine version* option: `auto` picks the engine
+exactly as the core does (file-name tag, auto-detection, fallback); a forced
+version is used as is. The other options are the core options. The program
+is the core linked with `standalone/main.c`, which plays the frontend's part
+(window, audio, input), so a game runs as in RetroArch.
+
+Keyboard (player 1; the keys of RetroArch's default layout, then the
+RetroPad mapping above):
+
+| Key | RetroPad | OpenBOR |
+|---|---|---|
+| Arrows | D-Pad | Move |
+| A | Y | Attack 1 |
+| Z | B | Jump |
+| X | A | Special |
+| S | X | Attack 2 |
+| Q / W | L / R | Attack 3 / Attack 4 |
+| Enter | Start | Start / pause |
+| Right Shift | Select | Esc (back / exit menus) |
+| F11, Alt+Enter | | fullscreen on / off |
+| Esc | | quit the program |
+
+Game controllers (any controller SDL2 knows: Xbox, PlayStation, Switch Pro
+and most others) are players 1–4 in connection order, with the RetroPad
+layout by button position (bottom = B, right = A, left = Y, top = X,
+shoulders = L / R, triggers = L2 / R2) and rumble. The keyboard drives
+player 1 as well. The window keeps the game's aspect ratio (black borders)
+and scales it with nearest-neighbour filtering.
+
+The console window of `openbor.exe` shows the engine choice and the errors;
+the engine's own log is in `OpenBOR/<engine>/Logs/` next to the program.
+
+## Streets of Rage X
 
 SoRX ships with its own engine (a fork of upstream OpenBOR from mid 2026)
 and a pak whose 4-byte magic was changed so stock engines refuse it; the
-contents themselves are plain. To play it with this core:
+contents themselves are plain. To play it with the core or the program:
 
 1. Restore the standard header (only the magic is rewritten, after checking
    that every file in the pak is plain data):
@@ -155,67 +231,60 @@ pak's own folder — like the original executable's working directory.
 
 ## Building
 
-Everything needed is bundled in `deps/` (zlib, libpng, libogg, libvorbis,
-libretro-common/libco), so only a C compiler, `make` and binutils (`ld -r`,
-`objcopy`) are required.
+Everything the engines need is bundled in `deps/` (zlib, libpng, libogg,
+libvorbis, libvpx, libretro-common/libco), so the core only needs a C
+compiler, `make` and binutils (`ld -r`, `objcopy`). The standalone program
+also needs SDL2 (development package, `sdl2-config`).
 
 ```sh
-make                          # Linux/BSD -> openbor_libretro.so, macOS -> .dylib
-make platform=win             # MinGW     -> openbor_libretro.dll
+make                          # core: Linux/BSD -> openbor_libretro.so, macOS -> .dylib
+make platform=win             # core: MinGW     -> openbor_libretro.dll
+make standalone               # program: openbor (SDL2 from sdl2-config)
 make ENGINES="6391 7555"      # choose the engine versions to include
 make DEBUG=1                  # -O0 -g
 make SYSTEM_ZLIB=1 SYSTEM_LIBPNG=1 SYSTEM_VORBIS=1   # use system libraries
 make ENGINES="6391 8025"      # without 8025_webm: no threads, no libvpx
+make SDL2_CONFIG=/path/to/sdl2-config standalone    # another SDL2
 ```
 
 The `8025_webm` engine additionally builds the VP8 decoder of libvpx 1.15.2
 from `deps/libvpx` (decoder only, portable C, no assembler needed) and links
-pthreads (native Win32 threads on Windows). Objects go to `obj/<platform>/`,
-one subdirectory per engine.
+pthreads (native Win32 threads on Windows). The bundled libpng is built
+without its SIMD code (NEON, MSA, VSX), so every architecture builds the
+same way. Objects go to `obj/<platform>/`, one subdirectory per engine; the
+core and the program share them.
 
-`./build.sh` wraps the same commands (`./build.sh win` for a MinGW cross build,
-`./build.sh test some.pak` for a build plus a headless smoke test).
-
-### Standalone program
-
-The same engines also build as a program that needs no libretro frontend:
-`standalone/main.c` is a small SDL2 host (window, audio, keyboard, game
-controllers, rumble) linked with the core's objects. It answers the core's
-environment calls itself, so a game runs exactly as in the core.
+`build.sh` is the portable build script (the one shipped in the releases):
 
 ```sh
-make standalone                       # -> openbor        (sdl2-config on the PATH)
-./build.sh standalone                 # the same
-./build.sh win-standalone             # -> openbor.exe    (MinGW cross build; SDL2's
-                                      #    MinGW package downloaded, linked statically)
+./build.sh                        # the core, native (Linux, macOS, MSYS2/MinGW)
+./build.sh win                    # the core for Windows, MinGW cross build
+./build.sh standalone             # the program, native (needs SDL2)
+./build.sh win-standalone [dir]   # openbor.exe, MinGW cross build: SDL2's MinGW
+                                  # development package (dir, or downloaded into
+                                  # deps/sdl2-mingw) linked statically: one .exe,
+                                  # a console program depending on system DLLs only
+./build.sh test some.pak          # the core + a headless smoke test
 ```
 
-```
-openbor [options] <game.pak>
-  --engine <name>   auto (default) or a version of --list-engines
-  --list-engines    print the engine versions built in
-  --fullscreen      start in fullscreen (F11 / Alt+Enter toggle)
-  --scale <n>       window size: n x the game's resolution (default 2)
-  --gamma <n>       OpenBOR gamma, -255 ... 255 (default 0)
-  --no-analog       the left stick does not move like the D-pad
-  --no-rumble       no controller rumble
-  --save-dir <dir>  where OpenBOR/ is written (default: next to the program)
-```
+Cross builds: `make CC=aarch64-linux-gnu-gcc OBJCOPY=aarch64-linux-gnu-objcopy`
+builds the core for Linux aarch64; `CC` / `OBJCOPY` are taken from the
+environment by `build.sh` too (e.g. `CC=x86_64-w64-mingw32-gcc`).
 
-`--engine auto` chooses the engine as the core does (file-name tag, then
-detection). Keys of player 1: arrows, Z = B, X = A, A = Y, S = X, Q = L,
-W = R, Enter = Start, Right Shift = Select, Esc quits; game controllers are
-players 1-4 (SDL GameController mapping). The Linux program uses the
-system's SDL2 (`libsdl2-2.0-0`); the Windows one is a single `.exe`.
+### Release pipeline
 
-### Release
+`.github/workflows/release.yml` runs only when started by hand (*Actions →
+Release → Run workflow*, on the chosen branch, with an optional version name;
+empty means `<date>-<commit>`, e.g. `2026.11.10-205bfcb`). It builds, in
+parallel:
 
-`.github/workflows/release.yml`, started by hand (Actions → Release → Run
-workflow, on the chosen branch, with an optional version name: empty means
-`<date>-<commit>`), builds the core for Linux x86_64 and aarch64 (ARM
-runner), the standalone `openbor.exe` for Windows and `openbor` for Linux
-x86_64, and publishes them as a GitHub release; every zip holds the README,
-the licence and `build.sh`.
+* the core for Linux x86_64 (Ubuntu 22.04, so it runs on glibc 2.35 and
+  newer) and for Linux aarch64 (on an ARM runner);
+* `openbor.exe` for Windows x86_64 (MinGW cross build, SDL2 static);
+* `openbor` for Linux x86_64;
+
+and publishes them as a GitHub release named after the version (the zips
+of *Downloads* above).
 
 Build numbers are upstream commit counts (`git rev-list --count`), which is
 how each engine's commit was identified. Note that the upstream tag `v4153`
@@ -289,6 +358,10 @@ damage-over-time arrays.
 * No save states and no reset (OpenBOR's global state cannot be reinitialised
   in place). Each engine can be started once per core load; to load another
   game, close the content (RetroArch reloads the core).
+* The standalone program runs one game per start (the same reason) and has
+  no in-program menu: options are command-line arguments. Its frame pacing
+  follows the core's 60 Hz clock (with vsync off); the keyboard layout is
+  fixed (the engine's control menu is hidden, as in the core).
 * WebM videos play only on `8025_webm` (the other engines are built without
   WebM, so their videos are skipped, as on upstream builds without WebM;
   animated GIF scenes work everywhere).
