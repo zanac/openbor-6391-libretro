@@ -212,10 +212,16 @@ engine of the core that checks the magic (3711, 4153, 6391, 8025 and
 both magics, so the pak loads as shipped. To play it with the core or the
 program:
 
-1. (Optional) `python3 tools/pak_fix_magic.py SORX.pak --in-place` still
-   restores the standard header, for other OpenBOR builds.
-2. Keep the game's layout and load `Paks/SORX.pak` — the name matters: a
-   startup script reads `Paks/SORX.pak` from the game folder to check it.
+1. Make the pak renamable: `python3 tools/sorx_renamable.py SORX.pak
+   "SORX [ob8025_webm].pak"`. A startup script (`loadPak` in
+   `data/scripts/loading.c`) opens `Paks/SORX.pak` or `Paks/1.0.0.pak` and
+   shuts the game down when it finds neither; the tool removes that check
+   (and writes the standard `PACK` magic), so the pak can have any name and
+   live anywhere. Its other fixed names (`Saves/SORX.set`, `Saves/SORX.sco`)
+   are the game's own data files and do not depend on the pak's name.
+2. Without the tool, keep the game's layout and load `Paks/SORX.pak`.
+   `python3 tools/pak_fix_magic.py SORX.pak --in-place` only restores the
+   standard header, for other OpenBOR builds.
 
 The logos, the intro and the animated title screen are WebM videos, so the
 game runs on `8025_webm` (chosen automatically; the converted pak can also be
