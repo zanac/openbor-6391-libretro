@@ -73,6 +73,8 @@
 * Requirements for packfiles.
 */
 #define PACKMAGIC      0x4B434150U
+/* Streets of Rage X (SoRX) ships its pak with the magic 1D 11 14 7F */
+#define PACKMAGIC_SORX 0x7F14111DU
 #define PACK_HEADER_SIZE 8U
 #define PAK32_TABLE_ENTRY_HEADER_SIZE 12U
 #define PAK64_TABLE_ENTRY_HEADER_SIZE  20U
@@ -369,7 +371,7 @@ static int packfile_read_format_fd(int file_descriptor, packfile_format *format)
         return 0;
     }
 
-    if(!packfile_read_lsb32_fd(file_descriptor, &magic) || magic != PACKMAGIC)  {
+    if(!packfile_read_lsb32_fd(file_descriptor, &magic) || (magic != PACKMAGIC && magic != PACKMAGIC_SORX))  {
         return 0;
     }
 

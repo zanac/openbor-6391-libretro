@@ -95,7 +95,7 @@ static int pak_open(pak_t *pak, const char *path)
     memset(pak, 0, sizeof(*pak));
     pak->f = fopen(path, "rb");
     if (!pak->f) return 0;
-    if (fread(hdr, 1, 8, pak->f) != 8 || memcmp(hdr, "PACK", 4) || rd32(hdr + 4) != 0)
+    if (fread(hdr, 1, 8, pak->f) != 8 || (memcmp(hdr, "PACK", 4) && memcmp(hdr, "\x1d\x11\x14\x7f", 4)) || rd32(hdr + 4) != 0)
         goto fail;
     if (fseek(pak->f, -4, SEEK_END) || (size = ftell(pak->f) + 4) < 12)
         goto fail;

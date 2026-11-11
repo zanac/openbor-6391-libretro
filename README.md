@@ -205,12 +205,15 @@ the engine's own log is in `OpenBOR/<engine>/Logs/` next to the program.
 ## Streets of Rage X
 
 SoRX ships with its own engine (a fork of upstream OpenBOR from mid 2026)
-and a pak whose 4-byte magic was changed so stock engines refuse it; the
-contents themselves are plain. To play it with the core or the program:
+and a pak whose 4-byte magic was changed from `PACK` to `1D 11 14 7F` so
+that stock engines refuse it; the contents themselves are plain. Every
+engine of the core that checks the magic (3711, 4153, 6391, 8025 and
+8025_webm; 7555 and 7735 do not check it) and the engine detection accept
+both magics, so the pak loads as shipped. To play it with the core or the
+program:
 
-1. Restore the standard header (only the magic is rewritten, after checking
-   that every file in the pak is plain data):
-   `python3 tools/pak_fix_magic.py SORX.pak --in-place`
+1. (Optional) `python3 tools/pak_fix_magic.py SORX.pak --in-place` still
+   restores the standard header, for other OpenBOR builds.
 2. Keep the game's layout and load `Paks/SORX.pak` — the name matters: a
    startup script reads `Paks/SORX.pak` from the game folder to check it.
 

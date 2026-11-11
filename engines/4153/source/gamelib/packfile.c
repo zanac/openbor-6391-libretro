@@ -53,6 +53,8 @@
 //
 #define	MAXPACKHANDLES	8
 #define	PACKMAGIC		0x4B434150
+// Streets of Rage X (SoRX) ships its pak with the magic 1D 11 14 7F
+#define	PACKMAGIC_SORX		0x7F14111D
 #define	PACKVERSION		0x00000000
 static const size_t USED_FLAG = (((size_t) 1) << ((sizeof(size_t) * 8) - 1));
 
@@ -497,7 +499,7 @@ int openPackfile(const char *filename, const char *packfilename)
 
 
     // Read magic dword ("PACK" identifier)
-    if(read(handle, &magic, 4) != 4 || magic != SwapLSB32(PACKMAGIC))
+    if(read(handle, &magic, 4) != 4 || (magic != SwapLSB32(PACKMAGIC) && magic != SwapLSB32(PACKMAGIC_SORX)))
     {
 #ifdef VERBOSE
         printf ("err magic\n");
@@ -1259,7 +1261,7 @@ int pak_init()
     pakfd = open(packfile, O_RDONLY | O_BINARY, 777);
 
     // Read magic dword ("PACK")
-    if(read(pakfd, &magic, 4) != 4 || magic != SwapLSB32(PACKMAGIC))
+    if(read(pakfd, &magic, 4) != 4 || (magic != SwapLSB32(PACKMAGIC) && magic != SwapLSB32(PACKMAGIC_SORX)))
     {
         close(pakfd);
         return -1;
