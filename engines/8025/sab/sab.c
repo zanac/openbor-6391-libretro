@@ -1407,7 +1407,9 @@ static int sab_postfx_grading(void)
 
 int sab_postfx_active(void)
 {
-    return sab_postfx_grading() || sab_gs_amount > 0;
+    /* the screen quad's fade too: the level complete wipe of a level
+       without grading (the Luna park) */
+    return sab_postfx_grading() || sab_gs_amount > 0 || (sab_sq_fade > 0 && sab_sq_noise);
 }
 
 int sab_postfx_split(void)
