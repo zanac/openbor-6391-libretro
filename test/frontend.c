@@ -393,10 +393,21 @@ int main(int argc, char **argv)
         /* REALTIME=1 paces retro_run() at the core's frame rate, like a real
          * frontend (needed for threaded work such as video decoding). */
         int realtime = getenv("REALTIME") && atoi(getenv("REALTIME"));
+        long perflog = getenv("PERFLOG") ? atol(getenv("PERFLOG")) : 0;
+        double tw = t0;
         for (frame_no = 0; frame_no < frames && !shutdown_flag; frame_no++)
         {
             if (unload_at >= 0 && frame_no == unload_at) break;
             p_retro_run();
+            /* PERFLOG=n: the speed of each window of n frames (slowdowns
+               that build up over a long run) */
+            if (perflog > 0 && (frame_no + 1) % perflog == 0)
+            {
+                double now = (double)perf_usec();
+                printf("[perf] frame %ld: %.1f fps\n", frame_no + 1, perflog * 1e6 / (now - tw));
+                fflush(stdout);
+                tw = now;
+            }
             if (realtime)
             {
                 retro_time_t due = (retro_time_t)t0 + (retro_time_t)((frame_no + 1) * 1e6 / av.timing.fps);
