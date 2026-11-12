@@ -23,6 +23,17 @@
 #include <ctype.h>
 #include <limits.h>
 
+#ifdef SAB
+/* SAB: animations with platform data ever loaded (only model loading
+   allocates animation->platform). None: no entity can be a platform, so
+   the scans over ent_list below find nothing - skip them (check_edge runs
+   eight of them per entity per frame: O(entities^2)). */
+static int sab_platform_anims = 0;
+#define SAB_NO_PLATFORMS (sab_platform_anims == 0)
+#else
+#define SAB_NO_PLATFORMS 0
+#endif
+
 #define NaN 0xAAAAAAAA
 
 char E_OUT_OF_MEMORY[] = "Error: Could not allocate sufficient memory.\n";
@@ -12281,6 +12292,9 @@ int addframe(s_addframe_data* data) {
     // Platform
     if(data->platform[PLATFORM_HEIGHT]) { //height
         if(!data->animation->platform) {
+#ifdef SAB
+            sab_platform_anims++;
+#endif
             data->animation->platform = malloc(data->framecount * sizeof(*data->animation->platform));
             memset(data->animation->platform, 0, data->framecount * sizeof(*data->animation->platform));
         }
@@ -29960,7 +29974,7 @@ entity *check_platform_between(float x, float z, float amin, float amax, entity 
     entity *plat = NULL;
     int i;
 
-    if(level == NULL)
+    if(level == NULL || SAB_NO_PLATFORMS)
     {
         return NULL;
     }
@@ -29986,7 +30000,7 @@ entity *check_platform_above(float x, float z, float a, entity *exclude)
     entity *plat = NULL;
     int i, ind;
 
-    if(level == NULL)
+    if(level == NULL || SAB_NO_PLATFORMS)
     {
         return NULL;
     }
@@ -30015,7 +30029,7 @@ entity *check_platform_below(float x, float z, float a, entity *exclude)
     entity *plat = NULL;
     int i, ind;
 
-    if(level == NULL)
+    if(level == NULL || SAB_NO_PLATFORMS)
     {
         return NULL;
     }
@@ -30045,7 +30059,7 @@ entity *check_platform_above_entity(entity *e)
     entity *plat = NULL;
     int i, ind;
 
-    if(level == NULL)
+    if(level == NULL || SAB_NO_PLATFORMS)
     {
         return NULL;
     }
@@ -30081,7 +30095,7 @@ entity *check_platform_below_entity(entity *e)
     entity *plat = NULL;
     int i, ind;
 
-    if(level == NULL)
+    if(level == NULL || SAB_NO_PLATFORMS)
     {
         return NULL;
     }
@@ -30138,7 +30152,7 @@ float checkbase(float x, float z, float y, entity *ent)
 entity *check_platform(float x, float z, entity *exclude)
 {
     int i;
-    if(level == NULL)
+    if(level == NULL || SAB_NO_PLATFORMS)
     {
         return NULL;
     }

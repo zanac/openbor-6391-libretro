@@ -35,6 +35,21 @@ dump of leaked variants are unchanged.
 Measured on the Slaps And Beans Western level (9000 frames, headless):
 146 s → 44 s.
 
+## Engine change: no platform scans without platforms
+
+`check_edge()` (called from `check_gravity()` for every entity on the
+ground, every frame) runs four `checkbase()` and four
+`check_platform_between()`, each a scan of the whole entity list: eight
+O(entities) scans per entity, O(entities²) per frame. A mod with many
+entities and no `platform` in any model pays all of it for nothing. With
+SAB, model loading counts the animations that get platform data (the only
+place `animation->platform` is allocated); while the count is 0 every
+`check_platform*()` returns NULL at once, which is exactly what the scan
+would find. Mods that use platforms are unaffected.
+
+Measured on the Slaps And Beans Luna park level (headless, in-game
+fights): ~18 fps → ~120-150 fps.
+
 ## Functions
 
 ### Profiler
