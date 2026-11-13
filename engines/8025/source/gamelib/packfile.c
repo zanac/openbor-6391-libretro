@@ -920,6 +920,155 @@ int openpackfile(const char *filename, const char *packfilename) {
     return pOpenPackfile(filename, packfilename);
 }
 
+#ifdef SAB
+/*
+* sab: an index of the pack table for the direct reader. openPackfile used to
+* read the table entry by entry (one read() per field) until the name
+* matched: with tens of thousands of entries every open cost tens of
+* milliseconds, and loading a big mod's models took many minutes. The table
+* is now read once per pack (path, size) into memory and hashed by the
+* normalized name; the lookups then cost nothing. The entries are checked as
+* before when a file is opened.
+*/
+typedef struct packfile_direct_index_entry {
+    char *name;
+    packfile_offset_t data_offset;
+    packfile_size_t data_size;
+    uint32_t next;
+} packfile_direct_index_entry;
+
+static struct {
+    char path[PACKFILE_PATH_MAX];
+    packfile_size_t file_size;
+    packfile_direct_index_entry *entries;
+    uint32_t *buckets;
+    size_t count;
+    size_t bucket_count;
+    char *names;
+} packfile_direct_index;
+
+static uint32_t packfile_direct_hash(const char *name) {
+    uint32_t h = 2166136261u;
+    while(*name)  {
+        h ^= (unsigned char)packfile_normalized_path_character(name);
+        h *= 16777619u;
+        name++;
+    }
+    return h;
+}
+
+static void packfile_direct_index_free(void) {
+    free(packfile_direct_index.entries);
+    free(packfile_direct_index.buckets);
+    free(packfile_direct_index.names);
+    memset(&packfile_direct_index, 0, sizeof(packfile_direct_index));
+}
+
+/* Builds the index of a pack (its table read in one go). 1 on success. */
+static int packfile_direct_index_build(int fd, const char *packfilename, const packfile_format *format) {
+    size_t table_bytes, pos, n = 0, i, name_bytes;
+    unsigned char *table;
+    uint32_t record_size, h;
+    char *names;
+    packfile_direct_index_entry *e;
+
+    if(packfile_direct_index.entries && packfile_direct_index.file_size == format->file_size &&
+       !strncmp(packfile_direct_index.path, packfilename, PACKFILE_PATH_MAX))  {
+        return 1;
+    }
+    packfile_direct_index_free();
+    if(format->table_end_offset <= format->table_offset)  {
+        return 0;
+    }
+    table_bytes = (size_t)(format->table_end_offset - format->table_offset);
+    table = malloc(table_bytes);
+    if(!table)  {
+        return 0;
+    }
+    if(packfile_seek_fd_unsigned(fd, format->table_offset, SEEK_SET) < 0 || !packfile_read_exact_fd(fd, table, table_bytes))  {
+        free(table);
+        return 0;
+    }
+    /* count the records */
+    for(pos = 0; pos + format->entry_header_size <= table_bytes; pos += record_size)  {
+        record_size = (uint32_t)table[pos] | ((uint32_t)table[pos + 1] << 8) | ((uint32_t)table[pos + 2] << 16) | ((uint32_t)table[pos + 3] << 24);
+        if(record_size <= format->entry_header_size || record_size > table_bytes - pos)  {
+            break;
+        }
+        n++;
+    }
+    e = calloc(n ? n : 1, sizeof(*e));
+    names = malloc(table_bytes + n + 1);
+    packfile_direct_index.bucket_count = 1;
+    while(packfile_direct_index.bucket_count < n * 2)  {
+        packfile_direct_index.bucket_count <<= 1;
+    }
+    packfile_direct_index.buckets = malloc(packfile_direct_index.bucket_count * sizeof(uint32_t));
+    if(!e || !names || !packfile_direct_index.buckets)  {
+        free(e);
+        free(names);
+        free(table);
+        free(packfile_direct_index.buckets);
+        packfile_direct_index.buckets = NULL;
+        return 0;
+    }
+    memset(packfile_direct_index.buckets, 0xff, packfile_direct_index.bucket_count * sizeof(uint32_t));
+    packfile_direct_index.entries = e;
+    packfile_direct_index.names = names;
+    for(pos = 0, i = 0; i < n; i++, pos += record_size)  {
+        const unsigned char *r = table + pos;
+        record_size = (uint32_t)r[0] | ((uint32_t)r[1] << 8) | ((uint32_t)r[2] << 16) | ((uint32_t)r[3] << 24);
+        if(format->entry_header_size == PAK64_TABLE_ENTRY_HEADER_SIZE)  {
+            uint64_t o = 0, z = 0;
+            int k;
+            for(k = 7; k >= 0; k--)  {
+                o = (o << 8) | r[4 + k];
+                z = (z << 8) | r[12 + k];
+            }
+            e[i].data_offset = (packfile_offset_t)o;
+            e[i].data_size = (packfile_size_t)z;
+        }
+        else  {
+            e[i].data_offset = (packfile_offset_t)((uint32_t)r[4] | ((uint32_t)r[5] << 8) | ((uint32_t)r[6] << 16) | ((uint32_t)r[7] << 24));
+            e[i].data_size = (packfile_size_t)((uint32_t)r[8] | ((uint32_t)r[9] << 8) | ((uint32_t)r[10] << 16) | ((uint32_t)r[11] << 24));
+        }
+        name_bytes = record_size - format->entry_header_size;
+        if(name_bytes > PACKFILE_PATH_MAX - 1)  {
+            name_bytes = PACKFILE_PATH_MAX - 1;
+        }
+        memcpy(names, r + format->entry_header_size, name_bytes);
+        names[name_bytes] = '\0';
+        e[i].name = names;
+        names += strlen(names) + 1;
+        h = packfile_direct_hash(e[i].name) & (uint32_t)(packfile_direct_index.bucket_count - 1);
+        e[i].next = packfile_direct_index.buckets[h];
+        packfile_direct_index.buckets[h] = (uint32_t)i;
+    }
+    free(table);
+    packfile_direct_index.count = n;
+    packfile_direct_index.file_size = format->file_size;
+    strncpy(packfile_direct_index.path, packfilename, PACKFILE_PATH_MAX - 1);
+    packfile_direct_index.path[PACKFILE_PATH_MAX - 1] = '\0';
+    return 1;
+}
+
+/* The first entry of the index with that name (table order), NULL if none. */
+static const packfile_direct_index_entry *packfile_direct_index_find(const char *name) {
+    uint32_t i, best = 0xffffffffu;
+    size_t len = strlen(name);
+
+    i = packfile_direct_index.buckets[packfile_direct_hash(name) & (uint32_t)(packfile_direct_index.bucket_count - 1)];
+    while(i != 0xffffffffu)  {
+        const packfile_direct_index_entry *e = &packfile_direct_index.entries[i];
+        if(packfile_compare_names_normalized(name, len, e->name, strlen(e->name)) == 0 && i < best)  {
+            best = i;
+        }
+        i = e->next;
+    }
+    return best == 0xffffffffu ? NULL : &packfile_direct_index.entries[best];
+}
+#endif
+
 int openPackfile(const char *filename, const char *packfilename) {
     int virtual_handle;
     int real_handle;
@@ -953,6 +1102,31 @@ int openPackfile(const char *filename, const char *packfilename) {
         packfile_handle_release(&packfile_handle_table, virtual_handle);
         return -1;
     }
+
+#ifdef SAB
+    if(packfile_direct_index_build(real_handle, packfilename, &format))  {
+        const packfile_direct_index_entry *found = packfile_direct_index_find(pak_filename);
+        if(!found)  {
+            close(real_handle);
+            packfile_handle_release(&packfile_handle_table, virtual_handle);
+            return -1;
+        }
+        memset(&entry, 0, sizeof(entry));
+        entry.data_offset = found->data_offset;
+        entry.data_size = found->data_size;
+        strncpy(entry.name, found->name, sizeof(entry.name) - 1);
+        if(!packfile_entry_data_range_is_valid(&format, &entry) ||
+           !packfile_asset_size_is_supported(entry.data_size, entry.name) ||
+           packfile_seek_fd_unsigned(real_handle, entry.data_offset, SEEK_SET) < 0)  {
+            close(real_handle);
+            packfile_handle_release(&packfile_handle_table, virtual_handle);
+            return -1;
+        }
+        handle_record->file_descriptor = real_handle;
+        handle_record->size = entry.data_size;
+        return virtual_handle;
+    }
+#endif
 
     table_position = format.table_offset;
     while(table_position < format.table_end_offset)  {

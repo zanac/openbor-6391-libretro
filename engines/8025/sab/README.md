@@ -50,6 +50,20 @@ would find. Mods that use platforms are unaffected.
 Measured on the Slaps And Beans Luna park level (headless, in-game
 fights): ~18 fps → ~120-150 fps.
 
+## Engine change: indexed pack table for the direct reader
+
+The libretro glue opens files with the direct pak reader
+(`packfile_mode(0)`): stock `openPackfile()` read the pak's table entry by
+entry (several `read()` calls per entry) until the name matched, for every
+file opened. With a pak of 64,000 files (Slaps And Beans up to the Chase)
+the start took about 30 minutes. With SAB the table is read once per pak
+into a hash index (FNV-1a of the normalized name: case and slashes as the
+stock comparison) and each open is a lookup; the lowest-numbered match wins,
+as the scan would find it, and the entry's validity checks are unchanged.
+The scan stays as the fallback when the index cannot be built.
+
+Measured on that pak: start ~30 min → ~23 s.
+
 ## Functions
 
 ### Profiler
